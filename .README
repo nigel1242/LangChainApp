@@ -2,3 +2,11 @@ Read this file for instructions
 
 1. Open terminal and run pip install -r requirements.txt
 2. streamlit app.py to run the file
+
+Steps to push code to GitHub
+1. git status
+2. git add (file name)
+3. git commit -m "Add your comments here"
+4. git push -m origin dev
+
+Please DO NOT push to master branch. Dev branch is all for testing purposes.
