@@ -1,0 +1,4 @@
+Read this file for instructions
+
+1. Open terminal and run pip install -r requirements.txt
+2. streamlit app.py to run the file
