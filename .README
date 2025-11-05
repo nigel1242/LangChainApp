@@ -1,6 +1,11 @@
 Read this file for instructions
 
-1. Open terminal and run pip install -r requirements.txt
+Create new python environment
+1. Terminal > python -m venv venv
+2. venv/Scripts/Activate
+
+Installing pre-requisites
+1. Terminal > pip install -r requirements.txt
 2. streamlit app.py to run the file
 
 Switch your branch to dev
