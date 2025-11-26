@@ -1,16 +1,15 @@
-streamlit==1.51.0
-ollama==0.6.0
-openai==2.7.1
-#pypdf==6.2.0
-pymupdf==1.26.6
-langchain-community==0.4.1
-faiss-cpu==1.12.0
-python-docx==1.2.0
-python-pptx==1.0.2
-pandas==2.2.3
+langchain==0.0.184
+PyPDF2==3.0.1
+python-dotenv==1.0.0
+streamlit==1.18.1
+openai==0.27.6
+faiss-cpu==1.7.4
+altair==4
+tiktoken==0.4.0
 qdrant_client
+# uncomment to use huggingface llms
+# huggingface-hub==0.14.1
 
-
-#python -m venv venv
-#pip install -r requirements.txt
-#streamlit run app.py
+# uncomment to use instructor embeddings
+# InstructorEmbedding==1.0.1
+# sentence-transformers==2.2.2`
