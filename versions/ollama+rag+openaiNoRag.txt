@@ -1,0 +1,400 @@
+import streamlit as st
+import ollama
+import os
+import sqlite3
+from pypdf import PdfReader
+import openai
+from openai import OpenAI
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_core.embeddings import Embeddings
+from langchain_core.documents import Document
+
+# ------------------ CONFIG ------------------
+st.set_page_config(
+    page_title="AI Playground with RAG",
+    page_icon="💬",
+    layout="wide",
+)
+
+CHAT_DB_FILE = "chat_playground.db"
+RAG_INDEX_DIR = "rag_indices"
+os.makedirs(RAG_INDEX_DIR, exist_ok=True)
+
+# ------------------ DATABASE ------------------
+def init_db():
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_name TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            used_rag INTEGER DEFAULT 0,
+            FOREIGN KEY (chat_id) REFERENCES chats (id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS rag_docs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            file_name TEXT,
+            content TEXT,
+            FOREIGN KEY (chat_id) REFERENCES chats (id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def create_new_chat(model_name: str, first_message: str = ""):
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO chats (model_name) VALUES (?)", (model_name,))
+    chat_id = cursor.lastrowid
+    if first_message:
+        cursor.execute(
+            "INSERT INTO messages (chat_id, role, content) VALUES (?, ?, ?)",
+            (chat_id, "user", first_message),
+        )
+    conn.commit()
+    conn.close()
+    return chat_id
+
+def add_message(chat_id, role, content, used_rag=0):
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO messages (chat_id, role, content, used_rag) VALUES (?, ?, ?, ?)",
+        (chat_id, role, content, used_rag),
+    )
+    conn.commit()
+    conn.close()
+
+def load_all_chats():
+    if not os.path.exists(CHAT_DB_FILE):
+        return []
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, model_name, created_at FROM chats ORDER BY created_at DESC")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+def load_chat(chat_id):
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT role, content, used_rag FROM messages WHERE chat_id = ? ORDER BY id ASC", (chat_id,))
+    rows = cursor.fetchall()
+    cursor.execute("SELECT model_name FROM chats WHERE id = ?", (chat_id,))
+    model_name = cursor.fetchone()[0]
+    conn.close()
+    return [{"role": r, "content": c, "used_rag": ur} for r, c, ur in rows], model_name
+
+def add_rag_doc(chat_id, file_name, content):
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO rag_docs (chat_id, file_name, content) VALUES (?, ?, ?)",
+        (chat_id, file_name, content),
+    )
+    conn.commit()
+    conn.close()
+
+def get_chat_documents(chat_id):
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT file_name FROM rag_docs WHERE chat_id = ?", (chat_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+# ------------------ RAG / Ollama ------------------
+class OllamaEmbeddings(Embeddings):
+    def __init__(self, model_name):
+        self.model_name = model_name
+
+    def embed_documents(self, texts):
+        return [ollama.embeddings(model=self.model_name, prompt=t)['embedding'] for t in texts]
+
+    def embed_query(self, query):
+        return ollama.embeddings(model=self.model_name, prompt=query)['embedding']
+
+def rebuild_rag_index(chat_id, model_name):
+    conn = sqlite3.connect(CHAT_DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT content, file_name FROM rag_docs WHERE chat_id = ?", (chat_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    if not rows:
+        return
+
+    all_docs = []
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    for content, file_name in rows:
+        chunks = splitter.split_text(content)
+        for chunk in chunks:
+            all_docs.append(Document(page_content=chunk, metadata={"source": file_name}))
+
+    if not all_docs:
+        return
+
+    embeddings = OllamaEmbeddings(model_name)
+    faiss_index = FAISS.from_documents(all_docs, embeddings)
+    faiss_index.save_local(os.path.join(RAG_INDEX_DIR, f"chat_{chat_id}.faiss"))
+
+def get_relevant_rag(chat_id, query, model_name, top_k=3):
+    faiss_index_path = os.path.join(RAG_INDEX_DIR, f"chat_{chat_id}.faiss")
+    if not os.path.exists(faiss_index_path):
+        return "", False
+    embeddings = OllamaEmbeddings(model_name)
+    faiss_index = FAISS.load_local(faiss_index_path, embeddings, allow_dangerous_deserialization=True)
+    docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
+    if not docs_with_scores:
+        return "", False
+    relevant_docs = [doc for doc, score in docs_with_scores]
+    context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d in relevant_docs)
+    return context, True
+
+# ------------------ PDF Helper ------------------
+def extract_text_from_pdf(file_bytes):
+    reader = PdfReader(file_bytes)
+    text_content = ""
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text_content += page_text + "\n"
+    return text_content
+
+# ------------------ MAIN APP ------------------
+def main():
+    st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
+    init_db()
+
+    # --- Session state ---
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "current_chat_id" not in st.session_state:
+        st.session_state.current_chat_id = None
+    if "selected_model" not in st.session_state:
+        st.session_state.selected_model = None
+    if "uploaded_files_to_process" not in st.session_state:
+        st.session_state.uploaded_files_to_process = []
+    if "openai_api_key" not in st.session_state:
+        st.session_state.openai_api_key = None
+
+    # --- Sidebar ---
+    with st.sidebar:
+        st.header("💾 Chat Sessions")
+        if st.button("🆕 New Chat"):
+            st.session_state.messages = []
+            st.session_state.current_chat_id = None
+            st.session_state.selected_model = None
+            st.session_state.uploaded_files_to_process = []
+
+        for chat_id, model_name, _ in load_all_chats():
+            if st.button(f"{model_name} Chat", key=f"chat_{chat_id}"):
+                msgs, model = load_chat(chat_id)
+                st.session_state.messages = msgs
+                st.session_state.current_chat_id = chat_id
+                st.session_state.selected_model = model
+
+        st.markdown("---")
+        st.session_state.rag_mode = st.checkbox("💡 Enable RAG (Ollama only)", value=True)
+
+        # OpenAI API Key input
+        with st.expander("🔑 OpenAI API Key"):
+            api_key_input = st.text_input(
+                "Enter your OpenAI API Key",
+                type="password",
+                value=st.session_state.get("openai_api_key", "")
+            )
+            if api_key_input:
+                st.session_state.openai_api_key = api_key_input
+                st.success("✅ API key saved")
+
+    # --- Available Models ---
+    try:
+        ollama_models = tuple(m['model'] for m in ollama.list().get("models", []))
+    except Exception:
+        ollama_models = ()
+    openai_models = ("gpt-3.5-turbo", "gpt-4") if st.session_state.openai_api_key else ()
+    available_models = ollama_models + openai_models
+
+    if not available_models:
+        st.warning("⚠️ No models available.")
+        st.stop()
+
+    # Disable the dropdown if a chat already exists
+    disable_model_select = st.session_state.current_chat_id is not None
+
+    selected_model = st.selectbox(
+        "🧠 Choose model",
+        available_models,
+        index=available_models.index(st.session_state.selected_model) if st.session_state.selected_model in available_models else 0,
+        disabled=disable_model_select
+    )
+
+    # Only update session_state if creating a new chat
+    if not disable_model_select:
+        st.session_state.selected_model = selected_model
+
+    message_container = st.container()
+
+    # --- RAG File Uploader (Ollama only) ---
+    if st.session_state.selected_model in ollama_models:
+        with st.expander("📤 Upload Documents"):
+            uploaded = st.file_uploader(
+                "Upload text or PDF files (multiple allowed)",
+                type=["txt", "pdf", "PDF"],
+                accept_multiple_files=True,
+                key="rag_uploader_batch",
+            )
+            if uploaded:
+                st.session_state.uploaded_files_to_process = uploaded
+
+        if st.session_state.uploaded_files_to_process:
+            if st.button("📂 Process Uploaded Files"):
+                chat_id_to_process = st.session_state.current_chat_id
+                if chat_id_to_process is None:
+                    chat_id_to_process = create_new_chat(st.session_state.selected_model)
+                    st.session_state.current_chat_id = chat_id_to_process
+                    st.session_state.messages = []
+
+                existing_docs = get_chat_documents(chat_id_to_process)
+                processed_files_in_batch = set()
+
+                for f in st.session_state.uploaded_files_to_process:
+                    if f.name in existing_docs or f.name in processed_files_in_batch:
+                        st.warning(f"⚠️ {f.name} already exists. Skipping.")
+                        continue
+
+                    processed_files_in_batch.add(f.name)
+
+                    content = extract_text_from_pdf(f) if f.type == "application/pdf" else f.read().decode("utf-8")
+                    add_rag_doc(chat_id_to_process, f.name, content)
+                    sys_msg = f"📄 File uploaded: {f.name}"
+                    add_message(chat_id_to_process, "system", sys_msg)
+                    st.session_state.messages.append({"role": "system", "content": sys_msg})
+
+                rebuild_rag_index(chat_id_to_process, st.session_state.selected_model)
+                st.session_state.uploaded_files_to_process = []
+                st.rerun()
+
+    # --- Display chat history ---
+    for msg in st.session_state.messages:
+        avatar = "🤖" if msg["role"]=="assistant" else "😎"
+        prefix = "📄 " if msg.get("used_rag") else ""
+        with message_container.chat_message(msg["role"], avatar=avatar):
+            st.markdown(prefix + msg["content"])
+
+    # --- Chat input ---
+    if prompt := st.chat_input("Type your message here..."):
+        use_rag = False
+        enhanced_prompt = prompt
+        chat_id = st.session_state.current_chat_id or create_new_chat(st.session_state.selected_model, prompt)
+        st.session_state.current_chat_id = chat_id
+        add_message(chat_id, "user", prompt)
+        st.session_state.messages.append({"role":"user","content":prompt,"used_rag":0})
+        with message_container.chat_message("user", avatar="😎"):
+            st.markdown(prompt)
+
+        # --- Ollama RAG path ---
+        if st.session_state.selected_model in ollama_models:
+            rag_content = ""
+            if st.session_state.rag_mode:
+                rag_content, has_docs = get_relevant_rag(chat_id, prompt, st.session_state.selected_model)
+                use_rag = has_docs
+
+            if use_rag:
+                enhanced_prompt = f"""You have access to relevant background documents.
+                                        Answer naturally using the documents if possible.
+
+                                        Background documents:
+                                        {rag_content}
+
+                                        Question: {prompt}"""
+            avatar = "🤖"
+            with message_container.chat_message("assistant", avatar=avatar):
+                stream_placeholder = st.empty()
+                streamed_text = ""
+                try:
+                    for chunk in ollama.chat(model=st.session_state.selected_model,
+                                             messages=[{"role":"user","content":enhanced_prompt}],
+                                             stream=True):
+                        delta = chunk.get("message", {}).get("content", "") or chunk.get("delta", "")
+                        if delta:
+                            streamed_text += delta
+                            display_text = ("📄 " if use_rag else "") + streamed_text
+                            stream_placeholder.markdown(display_text)
+                    add_message(chat_id, "assistant", streamed_text, used_rag=int(use_rag))
+                    st.session_state.messages.append({"role":"assistant","content":streamed_text,"used_rag":int(use_rag)})
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                    add_message(chat_id, "assistant", f"[ERROR] {e}", used_rag=0)
+
+        # --- OpenAI path with streaming ---
+        elif st.session_state.selected_model in openai_models:
+            client = OpenAI(api_key=st.session_state.openai_api_key)
+            try:
+                messages_for_openai = [
+                    {"role": m["role"], "content": m["content"]} for m in st.session_state.messages
+                ]
+                
+                if use_rag:
+                    for i in range(len(messages_for_openai) - 1, -1, -1):
+                        if messages_for_openai[i]["role"] == "user":
+                            messages_for_openai[i]["content"] = enhanced_prompt
+                            break
+                streamed_text = ""
+                
+                # 1. FIX: Use st.chat_message as a context, and create st.empty() inside it.
+                with st.chat_message("assistant", avatar="🤖"):
+                    stream_placeholder = st.empty() # Create the placeholder here
+
+                    # 2. FIX: Call .create(stream=True)
+                    stream = client.chat.completions.create(
+                        model=st.session_state.selected_model,
+                        messages=messages_for_openai,
+                        temperature=0.7,
+                        max_tokens=1000,
+                        stream=True
+                    )
+
+                    # 3. FIX: Iterate over the stream 'chunk' directly
+                    for chunk in stream:
+                        # 4. FIX: Access the content delta and check if it's not None
+                        if chunk.choices[0].delta.content is not None:
+                            delta = chunk.choices[0].delta.content
+                            streamed_text += delta
+                            
+                            # 5. FIX: Update the placeholder with the RAG prefix if needed
+                            display_text = ("📄 " if use_rag else "") + streamed_text
+                            stream_placeholder.markdown(display_text)
+
+                # Save final assistant message (passing the use_rag flag)
+                add_message(chat_id, "assistant", streamed_text, used_rag=int(use_rag))
+                st.session_state.messages.append({"role":"assistant","content":streamed_text,"used_rag":int(use_rag)})
+
+            except openai.AuthenticationError as e:
+                # Catching the most common error specifically
+                st.error("❌ Invalid OpenAI API key. Please check the key in the sidebar.")
+                streamed_text = "[ERROR] Invalid API Key."
+                add_message(chat_id, "assistant", streamed_text, used_rag=0)
+
+            except Exception as e:
+                # Catch all other errors
+                st.error(f"OpenAI Error: {e}")
+                streamed_text = f"[ERROR] {e}"
+                add_message(chat_id, "assistant", streamed_text, used_rag=0)
+
+if __name__ == "__main__":
+    main()
