@@ -8,8 +8,20 @@ import sqlite3
 import streamlit as st
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS, Qdrant
+from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+
+# Try to import Qdrant from the correct package
+try:
+    from langchain_qdrant import QdrantVectorStore
+    QDRANT_AVAILABLE = True
+except ImportError:
+    try:
+        from langchain_community.vectorstores import Qdrant as QdrantVectorStore
+        QDRANT_AVAILABLE = True
+    except ImportError:
+        QDRANT_AVAILABLE = False
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
@@ -207,8 +219,12 @@ def get_relevant_rag_faiss(db_file: str, rag_index_dir: str, chat_id, query, mod
 ##################################################################################################
 # ----------------- RAG Core Functions with Qdrant -------------------
 
-def rebuild_rag_index_qdrant(db_file: str, qdrant_url: str, chat_id, model_name, ollama_models, openai_models):
+def rebuild_rag_index_qdrant(db_file: str, qdrant_url: str, chat_id, model_name, ollama_models, openai_models, qdrant_api_key=None):
     """Rebuilds the Qdrant vector index for a given chat."""
+    if not QDRANT_AVAILABLE:
+        st.error("Qdrant integration not available. Install: pip install langchain-qdrant")
+        return
+        
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute("SELECT content, file_name FROM rag_docs WHERE chat_id = ?", (chat_id,))
@@ -244,37 +260,70 @@ def rebuild_rag_index_qdrant(db_file: str, qdrant_url: str, chat_id, model_name,
         st.error(f"Unknown model type {model_name} for embeddings.")
         return
 
-    # Initialize Qdrant client
-    client = QdrantClient(url=qdrant_url)
-    collection_name = f"chat_{chat_id}"
-
-    # Create collection if it doesn't exist
     try:
-        client.get_collection(collection_name)
-        # Delete existing collection to rebuild
-        client.delete_collection(collection_name)
-    except:
-        pass
+        client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
+        collection_name = f"chat_{chat_id}"
 
-    # Create Qdrant vector store
-    qdrant_store = Qdrant.from_documents(
-        all_docs,
-        embeddings,
-        url=qdrant_url,
-        collection_name=collection_name,
-        prefer_grpc=False
-    )
+        # Delete existing collection if it exists
+        try:
+            client.delete_collection(collection_name)
+        except:
+            pass
+
+        # Use simpler from_documents with positional args only
+        vector_store = QdrantVectorStore.from_documents(
+            all_docs,
+            embeddings,
+            url=qdrant_url,
+            api_key=qdrant_api_key,
+            collection_name=collection_name,
+            prefer_grpc=False
+        )
+        
+    except Exception as e:
+        # If from_documents fails, try manual approach
+        try:
+            # Get embedding dimension
+            sample_embedding = embeddings.embed_query("test")
+            embedding_dim = len(sample_embedding)
+
+            # Create collection manually
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE)
+            )
+
+            # Create vector store and add documents
+            vector_store = QdrantVectorStore(
+                client=client,
+                collection_name=collection_name,
+                embedding=embeddings
+            )
+            vector_store.add_documents(all_docs)
+            
+        except Exception as e2:
+            st.error(f"Failed to create Qdrant index: {str(e2)}")
+            return
 
 
-def get_relevant_rag_qdrant(db_file: str, qdrant_url: str, chat_id, query, model_name, ollama_models, openai_models, top_k=3):
+def get_relevant_rag_qdrant(db_file: str, qdrant_url: str, chat_id, query, model_name, ollama_models, openai_models, top_k=3, qdrant_api_key=None):
     """Gets relevant RAG context from the Qdrant index."""
+    if not QDRANT_AVAILABLE:
+        return "", False
+        
     collection_name = f"chat_{chat_id}"
     
     # Check if collection exists
     try:
-        client = QdrantClient(url=qdrant_url)
-        client.get_collection(collection_name)
-    except:
+        client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
+        collection_info = client.get_collection(collection_name)
+        
+        # Check if collection has vectors
+        if collection_info.points_count == 0:
+            return "", False
+            
+    except Exception as e:
+        # Collection doesn't exist or other error
         return "", False
 
     # Choose embedding
@@ -282,41 +331,44 @@ def get_relevant_rag_qdrant(db_file: str, qdrant_url: str, chat_id, query, model
         embeddings = OllamaEmbeddings(model_name="nomic-embed-text")
     elif model_name in openai_models:
         if not st.session_state.openai_api_key:
-            st.error("OpenAI API key is missing. Cannot retrieve RAG context.")
             return "", False
         embeddings = OpenAIEmbeddings(
             model_name="text-embedding-3-small",
             api_key=st.session_state.openai_api_key
         )
     else:
-        st.error(f"Unknown model type {model_name} for embeddings.")
         return "", False
 
-    # Load Qdrant
-    qdrant_store = Qdrant(
-        client=client,
-        collection_name=collection_name,
-        embeddings=embeddings
-    )
+    try:
+        # Load Qdrant
+        qdrant_store = QdrantVectorStore(
+            client=client,
+            collection_name=collection_name,
+            embedding=embeddings
+        )
 
-    # Semantic similarity search
-    relevant_docs = qdrant_store.similarity_search(query, k=top_k)
+        # Semantic similarity search
+        relevant_docs = qdrant_store.similarity_search(query, k=top_k)
 
-    if not relevant_docs:
+        if not relevant_docs:
+            return "", False
+
+        # Combine into context
+        context = "\n\n".join(
+            f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}"
+            for d in relevant_docs
+        )
+        return context, True
+    
+    except Exception as e:
+        st.error(f"Error retrieving from Qdrant: {e}")
         return "", False
-
-    # Combine into context
-    context = "\n\n".join(
-        f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}"
-        for d in relevant_docs
-    )
-    return context, True
 
 
 ##################################################################################################
 # ----------------- Unified RAG Functions -------------------
 
-def rebuild_rag_index(db_file: str, rag_index_dir: str, chat_id, model_name, ollama_models, openai_models, vector_db="faiss", qdrant_url=None):
+def rebuild_rag_index(db_file: str, rag_index_dir: str, chat_id, model_name, ollama_models, openai_models, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):
     """Unified function to rebuild RAG index with selected vector database."""
     if vector_db == "faiss":
         rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_models, openai_models)
@@ -324,12 +376,12 @@ def rebuild_rag_index(db_file: str, rag_index_dir: str, chat_id, model_name, oll
         if not qdrant_url:
             st.error("Qdrant URL is required when using Qdrant vector database.")
             return
-        rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_models, openai_models)
+        rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_models, openai_models, qdrant_api_key)
     else:
         st.error(f"Unknown vector database: {vector_db}")
 
 
-def get_relevant_rag(db_file: str, rag_index_dir: str, chat_id, query, model_name, ollama_models, openai_models, top_k=3, vector_db="faiss", qdrant_url=None):
+def get_relevant_rag(db_file: str, rag_index_dir: str, chat_id, query, model_name, ollama_models, openai_models, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):
     """Unified function to get relevant RAG context with selected vector database."""
     if vector_db == "faiss":
         return get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, ollama_models, openai_models, top_k)
@@ -337,7 +389,7 @@ def get_relevant_rag(db_file: str, rag_index_dir: str, chat_id, query, model_nam
         if not qdrant_url:
             st.error("Qdrant URL is required when using Qdrant vector database.")
             return "", False
-        return get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, ollama_models, openai_models, top_k)
+        return get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, ollama_models, openai_models, top_k, qdrant_api_key)
     else:
         st.error(f"Unknown vector database: {vector_db}")
         return "", False

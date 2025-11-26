@@ -63,6 +63,11 @@ def main():
     if "qdrant_url" not in st.session_state:
         # Load from .env if available, otherwise use default
         st.session_state.qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+    if "qdrant_api_key" not in st.session_state:
+        # Load Qdrant API key from .env
+        st.session_state.qdrant_api_key = os.getenv("QDRANT_API_KEY", "")
+    if "rag_mode" not in st.session_state:
+        st.session_state.rag_mode = True
 
     # --- Sidebar ---
     with st.sidebar:
@@ -86,10 +91,13 @@ def main():
         # RAG Settings
         st.subheader("⚙️ RAG Settings")
         
+        # Enable/Disable RAG
+        st.session_state.rag_mode = st.checkbox("💡 Enable RAG", value=st.session_state.rag_mode)
+        
         # Vector Database Selection
         st.session_state.vector_db = st.selectbox(
             "🗄️ Vector Database",
-            ["FAISS (Local)", "Qdrant (Cloud)"],
+            ["faiss", "qdrant"],
             index=0 if st.session_state.vector_db == "faiss" else 1
         )
         
@@ -99,6 +107,12 @@ def main():
                 st.info(f"🔗 Qdrant URL: {st.session_state.qdrant_url}")
             else:
                 st.warning("⚠️ Qdrant URL not found in .env file")
+            
+            # Show API key status
+            if st.session_state.qdrant_api_key:
+                st.success(f"✅ Qdrant API Key loaded (ends with: ...{st.session_state.qdrant_api_key[-4:]})")
+            else:
+                st.error("❌ Qdrant API Key not found in .env file")
 
         st.markdown("---")
 
@@ -150,8 +164,8 @@ def main():
     if not disable_model_select:
         st.session_state.selected_model = selected_model
 
-    # --- RAG File Uploader (only show when chat exists) ---
-    if st.session_state.current_chat_id is not None:
+    # --- RAG File Uploader (show after model is selected) ---
+    if st.session_state.selected_model is not None:
         with st.expander("📤 Upload Documents"):
             uploaded = st.file_uploader(
                 "Upload files",
@@ -164,6 +178,11 @@ def main():
 
         if st.session_state.uploaded_files_to_process:
             if st.button("📂 Process Uploaded Files"):
+                # Create chat if it doesn't exist
+                if st.session_state.current_chat_id is None:
+                    st.session_state.current_chat_id = create_new_chat(CHAT_DB_FILE, st.session_state.selected_model)
+                    st.session_state.messages = []
+                
                 chat_id_to_process = st.session_state.current_chat_id
 
                 existing_docs = get_chat_documents(CHAT_DB_FILE, chat_id_to_process)
@@ -187,7 +206,8 @@ def main():
                     CHAT_DB_FILE, RAG_INDEX_DIR, chat_id_to_process, 
                     st.session_state.selected_model, ollama_models, openai_models,
                     vector_db=st.session_state.vector_db,
-                    qdrant_url=st.session_state.qdrant_url if st.session_state.vector_db == "qdrant" else None
+                    qdrant_url=st.session_state.qdrant_url if st.session_state.vector_db == "qdrant" else None,
+                    qdrant_api_key=st.session_state.qdrant_api_key if st.session_state.vector_db == "qdrant" else None
                 )
                 st.session_state.uploaded_files_to_process = []
                 st.success(f"✅ Files processed using {st.session_state.vector_db.upper()}")
@@ -217,13 +237,18 @@ def main():
             st.markdown(prompt)
             
         # --- RAG Enhancement ---
-        rag_content, has_docs = get_relevant_rag(
-            CHAT_DB_FILE, RAG_INDEX_DIR, chat_id, prompt, 
-            st.session_state.selected_model, ollama_models, openai_models,
-            vector_db=st.session_state.vector_db,
-            qdrant_url=st.session_state.qdrant_url if st.session_state.vector_db == "qdrant" else None
-        )
-        use_rag = has_docs
+        if st.session_state.rag_mode:
+            rag_content, has_docs = get_relevant_rag(
+                CHAT_DB_FILE, RAG_INDEX_DIR, chat_id, prompt, 
+                st.session_state.selected_model, ollama_models, openai_models,
+                vector_db=st.session_state.vector_db,
+                qdrant_url=st.session_state.qdrant_url if st.session_state.vector_db == "qdrant" else None,
+                qdrant_api_key=st.session_state.qdrant_api_key if st.session_state.vector_db == "qdrant" else None
+            )
+            use_rag = has_docs
+        else:
+            rag_content = ""
+            use_rag = False
         
         if use_rag and rag_content.strip():
             enhanced_prompt = f"""You have access to background documents that may be relevant to the user's question.
