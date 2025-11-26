@@ -10,8 +10,14 @@ from modules.db import (
     init_db, create_new_chat, add_message,
     load_all_chats, load_chat, add_rag_doc, get_chat_documents
 )
-from modules.rag import rebuild_rag_index, get_relevant_rag
-from modules.file_processor import extract_text_from_file
+
+from modules.modules import (
+    OllamaEmbeddings,
+    OpenAIEmbeddings,
+    extract_text_from_file,
+    rebuild_rag_index,
+    get_relevant_rag
+)
 
 # ------------------ CONFIG ------------------
 st.set_page_config(
