@@ -1,9 +1,6 @@
 import streamlit as st
 import ollama
-import sys
 from time import sleep
-from pathlib import Path
-from utilities.icon import page_icon
 
 st.set_page_config(
     page_title="Model management",
@@ -12,9 +9,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
 def main():
-    page_icon("⚙️")
     st.subheader("Model Management", divider="red", anchor=False)
 
     st.subheader("Download Models", anchor=False)

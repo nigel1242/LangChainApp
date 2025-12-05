@@ -64,8 +64,10 @@ PPTX_EXTS = {".pptx"}
 CSV_EXTS = {".csv"}
 PDF_EXTS = {".pdf"}
 
+
 def _ext(path: str) -> str:
     return os.path.splitext(path)[1].lower()
+
 
 def extract_text_from_file(file) -> str:
     name = file.name.lower()
@@ -243,3 +245,9 @@ def get_relevant_rag(db_file, rag_index_dir=None, chat_id=None, query=None, mode
     else:
         st.error(f"Unknown vector DB: {vector_db}")
         return "", False
+
+
+# For backward compatibility - keep the old function signature
+def get_relevant_rag_legacy(db_file: str, rag_index_dir: str, chat_id, query, model_name, ollama_models, openai_models, top_k=3):
+    """Legacy function for backward compatibility."""
+    return get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, ollama_models, openai_models, top_k)

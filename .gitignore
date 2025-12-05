@@ -128,6 +128,19 @@ env.bak/
 venv.bak/
 venv/
 
+# Database
+*.db
+
+# JSON
+.json
+.JSON
+
+# Subjects
+subjects/
+
+# Rag indices
+rag_indices/*.faiss/
+
 # Spyder project settings
 .spyderproject
 .spyproject
