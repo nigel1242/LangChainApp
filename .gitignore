@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# Databases
+quiz_stats.db
+chat_playground.db
+users.db
+
 # Distribution / packaging
 .Python
 build/
