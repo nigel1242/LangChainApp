@@ -6,6 +6,9 @@ import random
 import re
 from typing import Any, Dict, List, Optional
 
+# --- NEW IMPORTS FOR OLLAMA ---
+import ollama
+# ------------------------------
 from openai import OpenAI
 
 # NEW: use the subject index so we know which slide/page a question came from
@@ -13,9 +16,10 @@ from modules.quizstats.file_utils import get_subject_index_entries
 
 
 # -------------------------------------------------------------
-#  OPENAI CLIENT
+#   OLLAMA/OPENAI CLIENT HANDLING
 # -------------------------------------------------------------
-def _get_client() -> OpenAI | None:
+def _get_openai_client() -> OpenAI | None:
+    """Gets the OpenAI client if the API key is available."""
     key = os.getenv("OPENAI_API_KEY", "").strip()
     if not key:
         return None
@@ -23,7 +27,7 @@ def _get_client() -> OpenAI | None:
 
 
 # -------------------------------------------------------------
-#  FALLBACK CHUNKING (used only if index is missing)
+#   FALLBACK CHUNKING (used only if index is missing)
 # -------------------------------------------------------------
 def _split_corpus_into_chunks(corpus_text: str, max_chars: int = 1800) -> List[str]:
     """
@@ -69,7 +73,7 @@ def _split_corpus_into_chunks(corpus_text: str, max_chars: int = 1800) -> List[s
 
 
 # -------------------------------------------------------------
-#  INDEX-AWARE CHUNK BUILDER
+#   INDEX-AWARE CHUNK BUILDER
 # -------------------------------------------------------------
 def _build_chunks_from_index(
     subject: str,
@@ -106,15 +110,104 @@ def _build_chunks_from_index(
 
 
 # -------------------------------------------------------------
-#  GPT QUESTION GENERATOR
+#   OLLAMA QUESTION GENERATOR (FIXED)
 # -------------------------------------------------------------
-def _call_openai_for_chunk(
-    client: OpenAI,
+def _call_ollama_for_chunk(
+    model_name: str,
     chunk_text: str,
     subject: str,
     max_q: int,
     context_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
+    """Generates quiz questions using a local Ollama model."""
+
+    system_msg = (
+        "You are an expert exam question writer for a polytechnic module.\n"
+        "Your job is to create challenging, contextualised multiple-choice questions.\n"
+        "Use ONLY the provided notes; do not invent new data.\n"
+        "If the text references images/figures/tables, mark the question as "
+        "requiring an image by setting `needs_image: true`, otherwise false.\n"
+        "Across the questions you output from this chunk, avoid asking the "
+        "exact same thing twice.\n"
+        "Return the output as a clean, single JSON object, with no surrounding text or markdown."
+    )
+
+    user_prompt = f"""
+Generate up to {max_q} **challenging** MCQs from the notes below.
+
+Notes (from subject: {subject}):
+<notes>
+{chunk_text}
+</notes>
+
+RULES:
+- Questions must test **concepts**, not simple copying of numbers or labels.
+- When the notes obviously refer to a chart, table, figure, or workflow,
+  add:
+      "needs_image": true
+      "image_hint": a short phrase that helps locate this slide/page.
+- Otherwise:
+      "needs_image": false
+- EXACT 4 options.
+- EXACT 1 correct answer.
+- Include a short explanation.
+- Include difficulty level: "easy", "medium", or "hard".
+
+Return **JSON ONLY** in this format:
+
+{{
+  "questions": [
+    {{
+      "question": "text (you may include LaTeX like $\\int_0^1 x^2 \\, dx$)",
+      "choices": ["The correct choice text.", "The first incorrect choice text.", "The second incorrect choice text.", "The third incorrect choice text."], # <-- EXPLICIT CONTENT PROMPT
+      "answer_index": 0,
+      "explanation": "...",
+      "needs_image": false,
+      "image_hint": "",
+      "difficulty": "medium"
+    }}
+  ]
+}}
+    """
+
+    try:
+        # FIX: Ensure parentheses are balanced and arguments are correct.
+        response = ollama.chat(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_prompt},
+            ],
+            options={
+                "temperature": 0.5,      # Increased temp slightly
+                "num_predict": 4096,     # CRITICAL: Increased token limit
+            }, # <--- Closing the options dictionary and continuing arguments
+            format="json",               # <--- Correct keyword argument
+        )
+        raw = response['message']['content']
+    except Exception as e:
+        print(f"[quiz_engine] Ollama error ({model_name}):", e)
+        return []
+    
+    return _parse_raw_quiz_json(raw, chunk_text, context_meta)
+
+# -------------------------------------------------------------
+#   GPT QUESTION GENERATOR (UPDATED SIGNATURE)
+# -------------------------------------------------------------
+def _call_openai_for_chunk(
+    model_name: str,
+    chunk_text: str,
+    subject: str,
+    max_q: int,
+    context_meta: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Generates quiz questions using the OpenAI API."""
+    
+    # FIX: Get client internally to simplify the MAIN call signature
+    client = _get_openai_client()
+    if client is None:
+        print("[quiz_engine] OpenAI API key missing inside chunk call. Skipping.")
+        return []
 
     system_msg = (
         "You are an expert exam question writer for a polytechnic module.\n"
@@ -166,19 +259,28 @@ Return **JSON ONLY** in this format:
 
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model_name, # USE THE PASSED MODEL NAME
             temperature=0.35,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_prompt},
             ],
+            # Note: OpenAI's client handles JSON response formatting separately from chat completions
         )
         raw = resp.choices[0].message.content
     except Exception as e:
         print("[quiz_engine] OpenAI error:", e)
         return []
 
+    return _parse_raw_quiz_json(raw, chunk_text, context_meta)
+
+
+# -------------------------------------------------------------
+#   JSON PARSING HELPER (EXTRACTED FROM GPT/OLLAMA CALLS)
+# -------------------------------------------------------------
+def _parse_raw_quiz_json(raw: str, chunk_text: str, context_meta: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # Extract JSON from the response
+    # This regex is robust against code fences (```json ... ```)
     match = re.search(r"\{[\s\S]*\}", raw or "")
     if not match:
         print("[quiz_engine] JSON block missing.")
@@ -190,7 +292,7 @@ Return **JSON ONLY** in this format:
     except Exception:
         print("[quiz_engine] JSON parse error.")
         return []
-
+# --- REST OF PARSING LOGIC IS UNCHANGED ---
     qs = data.get("questions", []) or []
     out: List[Dict[str, Any]] = []
 
@@ -244,11 +346,11 @@ Return **JSON ONLY** in this format:
 
 
 # -------------------------------------------------------------
-#  FALLBACK (NO API KEY)
+#   FALLBACK (NO API KEY / NO LLM CONNECTION)
 # -------------------------------------------------------------
 def _fallback_quiz(corpus_text: str, subject: str, n_questions: int):
     """
-    Simple backup if no OPENAI_API_KEY is set.
+    Simple backup if no OPENAI_API_KEY is set or LLM connection fails.
     """
     sents = re.split(r"(?<=[.!?])\s+", corpus_text)
     sents = [s for s in sents if 60 < len(s) < 240]
@@ -286,24 +388,28 @@ def _fallback_quiz(corpus_text: str, subject: str, n_questions: int):
 
 
 # -------------------------------------------------------------
-#  MAIN PUBLIC API
+#   MAIN PUBLIC API (FINALIZED)
 # -------------------------------------------------------------
 def build_quiz_from_corpus(
     corpus_text: str,
     subject: str,
+    model_name: str, # model_name is required
     n_questions: int = 10,
 ) -> List[Dict[str, Any]]:
 
     corpus_text = (corpus_text or "").strip()
     if not corpus_text:
         return []
+    
+    # Determine which call function to use
+    is_openai_model = "gpt" in model_name.lower()
+    
+    # The call function now only takes 5 arguments (model_name, chunk_text, etc.)
+    call_fn = _call_openai_for_chunk if is_openai_model else _call_ollama_for_chunk
+    
+    # If it's an OpenAI model, the call function internally checks the API key.
+    # If it's an Ollama model, the call function internally handles the connection.
 
-    client = _get_client()
-    if client is None:
-        print("[quiz_engine] No API key. Using fallback.")
-        return _fallback_quiz(corpus_text, subject, n_questions)
-
-    # Prefer using the subject index so each question knows its slide/page.
     indexed_chunks = _build_chunks_from_index(subject)
     quiz: List[Dict[str, Any]] = []
 
@@ -319,11 +425,12 @@ def build_quiz_from_corpus(
             chunk_text = item["text"]
             ctx = item["context"]
 
-            qs = _call_openai_for_chunk(
-                client,
+            # The call_fn signature is now consistent: (model_name, chunk_text, subject, max_q, context_meta)
+            qs = call_fn(
+                model_name, 
                 chunk_text,
                 subject,
-                max_q=1,               # at most 1 question from this slide/page
+                max_q=1,      # at most 1 question from this slide/page
                 context_meta=ctx,
             )
 
@@ -344,8 +451,13 @@ def build_quiz_from_corpus(
             if remain <= 0:
                 break
 
-            qs = _call_openai_for_chunk(
-                client, chunk, subject, max_q=min(3, remain), context_meta=None
+            # The call_fn signature is now consistent: (model_name, chunk, subject, max_q, context_meta)
+            qs = call_fn(
+                model_name, 
+                chunk, 
+                subject, 
+                max_q=min(3, remain), 
+                context_meta=None
             )
             for q in qs:
                 if all(q["question"] != e["question"] for e in quiz):
@@ -354,6 +466,7 @@ def build_quiz_from_corpus(
                         break
 
     if not quiz:
+        # If no questions were generated (e.g., LLM errors, network problems), fall back
         return _fallback_quiz(corpus_text, subject, n_questions)
 
     return quiz

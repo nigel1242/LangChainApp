@@ -5,6 +5,10 @@ import time
 
 import streamlit as st
 from dotenv import load_dotenv
+# >>> IMPORT OLLAMA AND OPENAI LIBRARIES <<<
+import ollama
+from openai import OpenAI
+import openai # Needed for the AuthenticationError in catch blocks
 
 from modules.quizstats.subject_store import (
     init_subject_db,
@@ -13,7 +17,7 @@ from modules.quizstats.subject_store import (
     get_subject_meta,
     save_subject_meta,
     ensure_subject_folders,
-    delete_subject,          # 🔹 NEW
+    delete_subject,      # 🔹 NEW
 )
 from modules.quizstats.file_utils import (
     save_uploaded_files,
@@ -34,12 +38,15 @@ st.set_page_config(page_title="Quiz Builder", page_icon="📝", layout="wide")
 load_dotenv()
 
 # ---------- SESSION ----------
+# Ensure keys exist for the quiz page, including a key for the API key if missing
+if "openai_api_key" not in st.session_state:
+    st.session_state["openai_api_key"] = os.getenv("OPENAI_API_KEY", "")
+
+# Update the quiz_state initialization
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
-        "provider": "none",
-        "model_name": "",
-        "use_env_key": True,
-        "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
+        # Removed "provider" and "model_name" here as they will be derived from the selector
+        "openai_api_key": st.session_state["openai_api_key"], # Use the central key
         "selected_subject": None,
         "new_subject_name": "",
         "uploads_buffer": [],
@@ -49,7 +56,8 @@ if "quiz_state" not in st.session_state:
         "answered": {},   # q_idx -> {"picked": int, "correct": bool, "already_counted": bool}
         "submitted": {},  # q_idx -> bool
         "corpus": "",
-        "show_image": {},  # q_idx -> bool (user clicked 'show context')
+        "show_image": {}, # q_idx -> bool (user clicked 'show context')
+        "selected_model": None, # New state variable to match app.py
     }
 
 S = st.session_state.quiz_state
@@ -60,35 +68,52 @@ init_stats_db()
 # ---------- HEADER ----------
 st.title("📝 Quiz Builder (Subjects + Files + 10 MCQs)")
 
-# ---------- MODEL / PROVIDER BOX ----------
-with st.expander("⚙️ Model / Provider (UI only for now)"):
+# >>> START: UNIFIED MODEL SELECTOR (Copied from app.py) <<<
+# --- Available Models ---
+# The logic must run outside the expander to enable model switching.
+try:
+    ollama_models = tuple(m['model'] for m in ollama.list().get("models", []))
+except Exception:
+    ollama_models = ()
+    
+# Use the session state key defined above/in .env
+openai_models = ("gpt-3.5-turbo","gpt-4") if st.session_state["openai_api_key"] else ()
+available_models = ollama_models + openai_models
 
-    S["provider"] = st.radio(
-        "Choose provider",
-        ["none", "ollama (local)", "openai (API)"],
-        index=["none", "ollama (local)", "openai (API)"].index(S["provider"]),
+if not available_models:
+    st.warning("⚠️ No models available. Check Ollama server or OpenAI key")
+    # st.stop() # Removed st.stop() so users can enter key in the sidebar if needed.
+    
+# >>> START: NEW DEFAULT MODEL INITIALIZATION <<<
+if available_models and S["selected_model"] is None:
+    # Set the default model to the first available model
+    S["selected_model"] = available_models[0]
+elif S["selected_model"] is not None and S["selected_model"] not in available_models:
+    # If a previously selected model is no longer available, reset to a valid one
+    S["selected_model"] = available_models[0] if available_models else None
+# >>> END: NEW DEFAULT MODEL INITIALIZATION <<<
+
+with st.expander("⚙️ Model / Provider"):
+    # Use the session state variable for selection
+    S["selected_model"] = st.selectbox(
+        "🧠 Choose model for RAG/Quiz Generation",
+        available_models,
+        index=available_models.index(S["selected_model"]) if S["selected_model"] in available_models else 0,
+        key="quiz_model_selector"
     )
 
-    cols = st.columns(2)
-    with cols[0]:
-        S["model_name"] = st.text_input(
-            "Model name",
-            value=S["model_name"],
-            placeholder="e.g., llama3:latest or gpt-4o-mini",
-        )
-    with cols[1]:
-        S["use_env_key"] = st.checkbox("Use OPENAI_API_KEY from .env", value=True)
-        if S["provider"] == "openai (API)" and not S["use_env_key"]:
-            S["openai_api_key"] = st.text_input(
-                "OpenAI API Key", value=S["openai_api_key"], type="password"
-            )
-
+    # Note: If you want to use the API key expander from app.py, you should move that logic here.
+    # For now, we will just display a message about the selected model.
+    if S["selected_model"]:
+        st.info(f"Using model: **{S['selected_model']}**")
+    
     st.caption(
         "This page uses a built-in quiz generator that calls GPT-4o-mini when an "
-        "OPENAI_API_KEY is set. The provider settings are kept for future integration."
+        "OPENAI_API_KEY is set. The selected model will be used for RAG/Quiz context creation."
     )
-
+    
 st.markdown("---")
+# >>> END: UNIFIED MODEL SELECTOR <<<
 
 # ---------- SUBJECTS: CREATE / SELECT ----------
 init_subject_db()
@@ -211,10 +236,19 @@ if st.button("🎲 Generate 10 Questions"):
     if not corpus.strip():
         st.warning("No text in this subject yet. Please upload/process files first.")
     else:
+        # Check if a model is selected before generating
+        if not S["selected_model"]:
+            st.error("Please select a model in the Model / Provider section first.")
+            st.stop()
+            
         quiz = build_quiz_from_corpus(
             corpus_text=corpus,
             subject=S["selected_subject"],
             n_questions=10,
+            # >>> PASS SELECTED MODEL TO QUIZ ENGINE <<<
+            model_name=S["selected_model"],
+            # You might need to pass the API key if build_quiz_from_corpus uses it:
+            # openai_api_key=st.session_state["openai_api_key"] 
         )
         S["quiz"] = quiz
         S["current_idx"] = 0
