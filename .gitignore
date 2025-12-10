@@ -137,8 +137,8 @@ venv/
 *.db
 
 # JSON
-.json
-.JSON
+*.json
+*.JSON
 
 # Subjects
 subjects/
