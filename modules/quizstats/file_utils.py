@@ -14,7 +14,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from pptx import Presentation
 import pandas as pd
 
-from modules.subject_store import SUBJECTS_DIR
+from modules.quizstats.subject_store import SUBJECTS_DIR
 
 # ------------ extension sets ------------
 

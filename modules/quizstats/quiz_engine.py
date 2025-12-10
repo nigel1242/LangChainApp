@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 # NEW: use the subject index so we know which slide/page a question came from
-from modules.file_utils import get_subject_index_entries
+from modules.quizstats.file_utils import get_subject_index_entries
 
 
 # -------------------------------------------------------------

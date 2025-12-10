@@ -6,14 +6,14 @@ import time
 import streamlit as st
 from dotenv import load_dotenv
 
-from modules.subject_store import (
+from modules.quizstats.subject_store import (
     init_subject_db,
     list_subjects,
     create_subject_if_missing,
     get_subject_meta,
     save_subject_meta,
 )
-from modules.file_utils import (
+from modules.quizstats.file_utils import (
     ensure_subject_folders,
     save_uploaded_files,
     extract_corpus_for_subject,
@@ -21,8 +21,8 @@ from modules.file_utils import (
     render_pdf_page_image,
     render_pptx_slide_image,
 )
-from modules.quiz_engine_simple import build_quiz_from_corpus
-from modules.progress_store import init_stats_db, record_attempt
+from modules.quizstats.quiz_engine import build_quiz_from_corpus
+from modules.quizstats.progress_store import init_stats_db, record_attempt
 
 # ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="Quiz Builder", page_icon="📝", layout="wide")

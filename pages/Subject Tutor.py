@@ -16,7 +16,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 
-from modules.subject_store import list_subjects, ensure_subject_folders
+from modules.quizstats.subject_store import list_subjects, ensure_subject_folders
 
 # ---------------- CONFIG ----------------
 load_dotenv()

@@ -8,8 +8,8 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from modules.subject_store import list_subjects
-from modules.progress_store import (
+from modules.quizstats.subject_store import list_subjects
+from modules.quizstats.progress_store import (
     init_stats_db,
     list_subjects_with_stats,
     get_attempts_for_subject,
