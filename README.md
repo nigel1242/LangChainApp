@@ -11,9 +11,10 @@ Else, skip to "If you don't have a GPU"
 
 1. Install ollama >> https://ollama.com/download/windows
 2. Open terminal in VSCode
-3. Pull Ollama embedder using "ollama pull nomic-embed-text". This is for the ollama embedder.
-4. Pull Ollama model Qwen2.5VL using "ollama pull qwen-2.5vl". This is for multimodal mode, where you can drop images in.
-5. Pull Ollama model Llama3 using "ollama pull llama3" This will be the main chat model.
+3. Pull ollama models and embedders: "ollama pull nomic-embed-text; ollama pull qwen2.5vl; ollama pull llama3:8b"
+nomic-embed-text: This is for the ollama embedder.
+qwen2.5vl: This is for multimodal mode, where you can drop images in.
+llama3: This will be the main chat model.
 
 If you don't have a GPU, you can only use openAI models.
 Just enter your API key in the sidebar and select one of the GPT models.
