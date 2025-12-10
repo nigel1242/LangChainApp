@@ -146,6 +146,9 @@ subjects/
 # Rag indices
 rag_indices/*.faiss/
 
+# Session tokens
+*.session_token
+
 # Spyder project settings
 .spyderproject
 .spyproject
