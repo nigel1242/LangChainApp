@@ -78,21 +78,14 @@ def main():
         qdrant_api_key=st.session_state.qdrant_api_key
     )
 
-    # --- Header with logout ---
-    col1, col2 = st.columns([6, 1])
-    with col1:
-        st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
-    with col2:
-        st.write(f"👤 {username}")
-        if st.button("🚪 Logout"):
-            logout()
-            st.rerun()
+   
+    st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
 
     # --- Sidebar ---
     with st.sidebar:
-        st.header("💾 Chat Sessions")
+        st.header("Chat Sessions")
         
-        if st.button("🆕 New Chat"):
+        if st.button("New Chat"):
             st.session_state.messages = []
             st.session_state.current_chat_id = None
             st.session_state.selected_model = None
@@ -115,7 +108,7 @@ def main():
         st.subheader("⚙️ RAG Settings")
         
         # Enable/Disable RAG
-        st.session_state.rag_enabled = st.checkbox("💡 Enable RAG", value=st.session_state.rag_enabled)
+        st.session_state.rag_enabled = st.checkbox("Enable RAG", value=st.session_state.rag_enabled)
         
         # Vector Database Selection
         st.session_state.vector_db = st.selectbox(
@@ -129,16 +122,16 @@ def main():
             if st.session_state.qdrant_url:
                 st.info("🔗 Qdrant URL found")
             else:
-                st.warning("⚠️ Qdrant URL not found in .env")
+                st.warning("Qdrant URL not found in .env")
             if st.session_state.qdrant_api_key:
-                st.success(f"✅ Qdrant API Key loaded (ends with ...{st.session_state.qdrant_api_key[-4:]})")
+                st.success(f"Qdrant API Key loaded (ends with ...{st.session_state.qdrant_api_key[-4:]})")
             else:
-                st.error("❌ Qdrant API Key not found in .env")
+                st.error("Qdrant API Key not found in .env")
 
         # OpenAI API key
-        with st.expander("🔑 API Keys"):
+        with st.expander("API Keys"):
             if st.session_state.openai_api_key:
-                st.success("✅ OpenAI API Key loaded from .env")
+                st.success("OpenAI API Key loaded from .env")
                 override_key = st.text_input(
                     "Override OpenAI API Key (optional)",
                     type="password",
@@ -146,7 +139,7 @@ def main():
                 )
                 if override_key:
                     st.session_state.openai_api_key = override_key
-                    st.success("✅ Using custom API key")
+                    st.success("Using custom API key")
             else:
                 api_key_input = st.text_input(
                     "Enter your OpenAI API Key",
@@ -154,7 +147,14 @@ def main():
                 )
                 if api_key_input:
                     st.session_state.openai_api_key = api_key_input
-                    st.success("✅ API key saved")
+                    st.success("API key saved")
+
+        st.write(f"👤 {username}")
+        if st.button("Logout"):
+            logout()
+            st.rerun()
+
+                   
 
     # --- Available Models ---
     try:
@@ -165,12 +165,12 @@ def main():
     available_models = ollama_models + openai_models
 
     if not available_models:
-        st.warning("⚠️ No models available. Check Ollama server or OpenAI key")
+        st.warning("No models available. Check Ollama server or OpenAI key")
         st.stop()
 
     disable_model_select = st.session_state.current_chat_id is not None
     selected_model = st.selectbox(
-        "🧠 Choose model",
+        "Choose model",
         available_models,
         index=available_models.index(st.session_state.selected_model) if st.session_state.selected_model in available_models else 0,
         disabled=disable_model_select
@@ -191,7 +191,7 @@ def main():
                 st.session_state.uploaded_files_to_process = uploaded
 
         if st.session_state.uploaded_files_to_process:
-            if st.button("📂 Process Uploaded Files"):
+            if st.button("Process Uploaded Files"):
                 # Create chat if it doesn't exist
                 if st.session_state.current_chat_id is None:
                     st.session_state.current_chat_id = db.create_new_chat(st.session_state.selected_model)
@@ -205,13 +205,13 @@ def main():
                 for f in st.session_state.uploaded_files_to_process:
                     # Skip duplicates in this batch
                     if f.name in processed_files_in_batch:
-                        st.warning(f"⚠️ {f.name} already exists in this batch. Skipping.")
+                        st.warning(f"{f.name} already exists in this batch. Skipping.")
                         continue
                     processed_files_in_batch.add(f.name)
 
                     content = extract_text_from_file(f)
                     db.add_rag_doc(chat_id_to_process, f.name, content)
-                    sys_msg = f"📄 File uploaded: {f.name}"
+                    sys_msg = f"File uploaded: {f.name}"
                     db.add_message(chat_id_to_process, "system", sys_msg)
                     st.session_state.messages.append({"role": "system", "content": sys_msg})
 
