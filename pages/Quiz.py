@@ -204,12 +204,6 @@ if st.button("📦 Process Uploaded Files"):
             f"Processed {len(saved)} file(s). Indexed {len(corpus):,} characters."
         )
 
-# ---------- SUBJECT SUMMARY ----------
-with st.expander("📁 Subject Storage"):
-    st.write(f"Root: `{subject_root}`")
-    meta = get_subject_meta(S["selected_subject"]) or {}
-    st.json(meta)
-
 # ---------- BUILD / START QUIZ ----------
 st.markdown("### 🧠 Generate Quiz (10 MCQs)")
 if st.button("🎲 Generate 10 Questions"):
