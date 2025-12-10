@@ -33,31 +33,30 @@ def _ext(path: str) -> str:
 
 def ensure_subject_folders(subject_name: str):
     """
-    Ensure subjects/<subject_name>/{raw,pdf} exist.
+    Ensure subjects/<subject_name>/raw exists.
+    All uploaded files (PDF, PPTX, DOCX, etc.) will be stored in this single folder.
     Returns the root path for that subject.
     """
     root = os.path.join(SUBJECTS_DIR, subject_name)
     raw = os.path.join(root, "raw")
-    pdf = os.path.join(root, "pdf")
     os.makedirs(raw, exist_ok=True)
-    os.makedirs(pdf, exist_ok=True)
     return root
 
 
 def save_uploaded_files(subject_name: str, files) -> List[str]:
     """
-    Saves uploaded files into subjects/<name>/raw or pdf.
+    Saves uploaded files into subjects/<name>/raw (single folder for all types).
     Returns list of saved paths.
     """
     root = ensure_subject_folders(subject_name)
+    raw_dir = os.path.join(root, "raw")
+    os.makedirs(raw_dir, exist_ok=True)
+
     saved: List[str] = []
 
     for f in files:
         name = f.name
-        ext = _ext(name)
-        # PDFs go into /pdf, everything else into /raw
-        subdir = "pdf" if ext in PDF_EXTS else "raw"
-        dest = os.path.join(root, subdir, name)
+        dest = os.path.join(raw_dir, name)
 
         # Reset file pointer (Streamlit sometimes reuses objects)
         try:
@@ -70,6 +69,7 @@ def save_uploaded_files(subject_name: str, files) -> List[str]:
         saved.append(dest)
 
     return saved
+
 
 
 # ------------ text extraction helpers ------------
@@ -279,24 +279,22 @@ def _pdf_page_texts_for_index(path: str) -> List[str]:
 
 def extract_corpus_for_subject(subject_name: str) -> str:
     """
-    Concatenate all raw + pdf text as a single corpus string AND
-    build a page_index.json with fine-grained contexts from all files.
+    Concatenate all text extracted from subjects/<subject>/raw as a single corpus string
+    AND build a page_index.json with fine-grained contexts from all files.
 
-    - raw/: .txt, .md, .docx, .pptx, .csv
-    - pdf/: .pdf
+    raw/: .txt, .md, .docx, .pptx, .csv, .pdf
     """
     root = ensure_subject_folders(subject_name)
     raw_dir = os.path.join(root, "raw")
-    pdf_dir = os.path.join(root, "pdf")
     corpus_parts: List[str] = []
     index_entries: List[Dict[str, Any]] = []
 
-    # RAW files
     if os.path.isdir(raw_dir):
         for fname in os.listdir(raw_dir):
             path = os.path.join(raw_dir, fname)
             ext = _ext(path)
 
+            # Plain text files
             if ext in TEXT_FILE_EXTS:
                 text = _read_text_file(path)
                 corpus_parts.append(text)
@@ -309,6 +307,7 @@ def extract_corpus_for_subject(subject_name: str) -> str:
                         "text": text,
                     })
 
+            # DOCX
             elif ext in DOCX_EXTS:
                 text = _extract_text_docx(path)
                 if text.strip():
@@ -324,6 +323,7 @@ def extract_corpus_for_subject(subject_name: str) -> str:
                             "text": sec,
                         })
 
+            # PPTX
             elif ext in PPTX_EXTS:
                 text = _extract_text_pptx(path)
                 if text.strip():
@@ -339,6 +339,7 @@ def extract_corpus_for_subject(subject_name: str) -> str:
                             "text": sec,
                         })
 
+            # CSV
             elif ext in CSV_EXTS:
                 text = _extract_text_csv(path)
                 corpus_parts.append(text)
@@ -351,11 +352,8 @@ def extract_corpus_for_subject(subject_name: str) -> str:
                         "text": text,
                     })
 
-    # PDF files
-    if os.path.isdir(pdf_dir):
-        for fname in os.listdir(pdf_dir):
-            path = os.path.join(pdf_dir, fname)
-            if _ext(path) in PDF_EXTS:
+            # PDF – now also stored in raw/
+            elif ext in PDF_EXTS:
                 text = _extract_text_pdf(path)
                 if text.strip():
                     corpus_parts.append(text)
@@ -381,6 +379,7 @@ def extract_corpus_for_subject(subject_name: str) -> str:
 
     # Join only non-empty chunks for corpus
     return "\n".join([c for c in corpus_parts if c and c.strip()])
+
 
 
 # ------------ context search helpers ------------

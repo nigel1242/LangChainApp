@@ -1,8 +1,9 @@
+#subject_store.py
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Tuple
-
+import shutil
 from tinydb import TinyDB, Query
 from tinydb.storages import JSONStorage
 
@@ -85,7 +86,6 @@ def ensure_subject_folders(subject_name: str) -> str:
     Ensure folders:
         subjects/<subject>/,
         subjects/<subject>/raw,
-        subjects/<subject>/pdf,
         subjects/<subject>/images
 
     Returns the root path for the subject.
@@ -96,14 +96,13 @@ def ensure_subject_folders(subject_name: str) -> str:
 
     root = os.path.join(SUBJECTS_DIR, subject_name)
     raw = os.path.join(root, "raw")
-    pdf = os.path.join(root, "pdf")
     images = os.path.join(root, "images")
 
     os.makedirs(raw, exist_ok=True)
-    os.makedirs(pdf, exist_ok=True)
     os.makedirs(images, exist_ok=True)
 
     return root
+
 
 
 def create_subject_if_missing(name: str) -> Tuple[bool, str]:
@@ -167,3 +166,37 @@ def save_subject_meta(name: str, meta: Dict[str, Any]) -> None:
         table.insert({"name": name, "meta": dict(meta or {})})
     else:
         table.update({"meta": dict(meta or {})}, q.name == name)
+def delete_subject(name: str) -> tuple[bool, str]:
+    """
+    Delete a subject from TinyDB and remove its folder under SUBJECTS_DIR.
+
+    Returns (ok: bool, message: str)
+    """
+    name = _normalize_name(name)
+    if not name:
+        return False, "Subject name cannot be empty."
+
+    db = _get_db()
+    table = db.table("subjects")
+    q = Query()
+
+    existing = table.get(q.name == name)
+    if not existing:
+        return False, f"Subject '{name}' not found."
+
+    # Remove from TinyDB
+    table.remove(q.name == name)
+
+    # Remove the subject folder on disk (subjects/<name>)
+    root = os.path.join(SUBJECTS_DIR, name)
+    if os.path.isdir(root):
+        try:
+            shutil.rmtree(root)
+        except Exception as e:
+            # Subject is removed from DB, but folder failed
+            return (
+                False,
+                f"Subject '{name}' removed from list, but failed to delete folder: {e}",
+            )
+
+    return True, f"Subject '{name}' deleted successfully."

@@ -12,9 +12,10 @@ from modules.quizstats.subject_store import (
     create_subject_if_missing,
     get_subject_meta,
     save_subject_meta,
+    ensure_subject_folders,
+    delete_subject,          # 🔹 NEW
 )
 from modules.quizstats.file_utils import (
-    ensure_subject_folders,
     save_uploaded_files,
     extract_corpus_for_subject,
     find_relevant_context_for_text,
@@ -22,7 +23,11 @@ from modules.quizstats.file_utils import (
     render_pptx_slide_image,
 )
 from modules.quizstats.quiz_engine import build_quiz_from_corpus
-from modules.quizstats.progress_store import init_stats_db, record_attempt
+from modules.quizstats.progress_store import (
+    init_stats_db,
+    record_attempt,
+    clear_subject_stats,     # 🔹 NEW
+)
 
 # ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="Quiz Builder", page_icon="📝", layout="wide")
@@ -116,6 +121,37 @@ with left:
         S["selected_subject"] = None
     else:
         S["selected_subject"] = selected_label
+
+    # 🔻 DELETE SUBJECT BUTTON (only when one is selected)
+    if S["selected_subject"]:
+        st.markdown("### Delete Subject")
+        if st.button(
+            f"🗑️ Delete subject '{S['selected_subject']}'",
+            type="secondary",
+            key="delete_subject_btn",
+        ):
+            # 1) Clear stats for that subject
+            try:
+                clear_subject_stats(S["selected_subject"])
+            except Exception as e:
+                st.warning(f"Could not clear stats for subject: {e}")
+
+            # 2) Delete subject from DB + disk
+            ok, msg = delete_subject(S["selected_subject"])
+            if ok:
+                st.success(msg + " All quiz stats for this subject were cleared.")
+                # 3) Reset local state
+                S["selected_subject"] = None
+                S["quiz"] = []
+                S["current_idx"] = 0
+                S["score"] = 0
+                S["answered"] = {}
+                S["submitted"] = {}
+                S["corpus"] = ""
+                S["show_image"] = {}
+                st.rerun()
+            else:
+                st.error(msg)
 
 with right:
     st.subheader("➕ New Subject")
