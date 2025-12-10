@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import ollama
 import os
@@ -5,9 +6,20 @@ import openai
 from openai import OpenAI
 import sys
 from pathlib import Path
-
 from dotenv import load_dotenv
-import sqlite3
+
+# --- Local Module Imports ---
+from modules.db_manager import DBManager
+from modules.functions import (
+    OllamaEmbeddings,
+    OpenAIEmbeddings,
+    extract_text_from_file,
+    rebuild_rag_index,
+    get_relevant_rag
+)
+# >>> START: LOGIN INTEGRATION <<<
+from modules.login import check_authentication, login_page, logout
+# >>> END: LOGIN INTEGRATION <<<
 
 # Load environment variables
 load_dotenv()
@@ -17,19 +29,6 @@ project_root = Path(__file__).parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-# --- Local Module Imports ---
-from modules.login import check_authentication, login_page, logout
-
-from modules.db_manager import DBManager
-
-from modules.functions import (
-    OllamaEmbeddings,
-    OpenAIEmbeddings,
-    extract_text_from_file,
-    rebuild_rag_index,
-    get_relevant_rag
-)
-        
 # ------------------ CONFIG ------------------
 st.set_page_config(
     page_title="My Learning AI",
@@ -43,15 +42,15 @@ os.makedirs(RAG_INDEX_DIR, exist_ok=True)
 
 # ---------------------- MAIN APP -----------------------
 def main():
-    # --- Authentication Check ---
+    # >>> START: AUTHENTICATION GATE <<<
     is_authenticated, username = check_authentication()
-    
+
     if not is_authenticated:
+        # If not authenticated, show the login/signup UI and stop execution
         login_page()
         st.stop()
-    
-    # --- User is authenticated, show main app ---
-    
+    # >>> END: AUTHENTICATION GATE <<<
+
     # ------------------ Initialize session state ------------------
     defaults = {
         "chat_backend": "sqlite",
@@ -70,68 +69,125 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = val
 
-    # Initialize database manager
+    st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
+
+    # ------------------ Initialize DBManager ------------------
     db = DBManager(
         backend=st.session_state.chat_backend,
-        db_file=CHAT_DB_FILE,
+        db_file="chat_playground.db",
         qdrant_url=st.session_state.qdrant_url,
         qdrant_api_key=st.session_state.qdrant_api_key
     )
 
-   
-    st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
+    # ------------------ Persist chat history ------------------
+    # The session state check should remain, using the DBManager instance 'db'
+    if st.session_state.get("current_chat_id") and "messages" not in st.session_state:
+        msgs, model = db.load_chat(st.session_state.current_chat_id)
+        st.session_state["messages"] = msgs
+        st.session_state["selected_model"] = model
 
     # --- Sidebar ---
     with st.sidebar:
-        st.header("Chat Sessions")
+        st.header("💾 Chat Sessions")
+
+        # >>> START: USER INFO AND LOGOUT BUTTON <<<
+        st.markdown(f"**👤 Logged in as: {username}**")
+        if st.button("🚪 Logout"):
+            logout()
+            st.rerun()
+        st.markdown("---")
+        # >>> END: USER INFO AND LOGOUT BUTTON <<<
         
-        if st.button("New Chat"):
-            st.session_state.messages = []
-            st.session_state.current_chat_id = None
-            st.session_state.selected_model = None
-            st.session_state.uploaded_files_to_process = []
+        # Load chats first
+        all_chats = db.load_all_chats()
+            
+        if st.button("🆕 New Chat"):
+            st.session_state.update({
+                "messages": [],
+                "current_chat_id": None,
+                "selected_model": None,
+                "uploaded_files_to_process": []
+            })
             st.rerun()
 
-        # Load all chats
-        all_chats = db.load_all_chats()
+        # Loop over chats
         for chat_id, model_name, _ in all_chats:
-            if st.button(f"{model_name} Chat", key=f"chat_{chat_id}"):
-                msgs, model = db.load_chat(chat_id)
-                st.session_state.messages = msgs
-                st.session_state.current_chat_id = chat_id
-                st.session_state.selected_model = model
-                st.rerun()
+            col1, col2 = st.columns([4,1])
+            with col1:
+                if st.button(f"{model_name} Chat", key=f"chat_{chat_id}"):
+                    msgs, model = db.load_chat(chat_id)
+
+                    st.session_state.update({
+                        "messages": msgs,
+                        "current_chat_id": chat_id,
+                        "selected_model": model
+                    })
+
+            with col2:
+                if st.button("✕", key=f"delete_{chat_id}"):
+                    db.delete_chat(chat_id, rag_index_dir=RAG_INDEX_DIR)
+
+                    st.session_state.update({
+                        "messages": [],
+                        "current_chat_id": None,
+                        "selected_model": None
+                    })
+                    st.rerun()
 
         st.markdown("---")
 
-        # RAG Settings
-        st.subheader("⚙️ RAG Settings")
-        
-        # Enable/Disable RAG
-        st.session_state.rag_enabled = st.checkbox("Enable RAG", value=st.session_state.rag_enabled)
-        
-        # Vector Database Selection
-        st.session_state.vector_db = st.selectbox(
-            "🗄️ Vector Database",
-            ["faiss", "qdrant"],
+        # Sidebar storage backend select
+        previous_storage_backend = st.session_state.get("prev_storage_backend", "faiss")
+
+        st.session_state.storage_backend = st.selectbox(
+            "🗄️ Storage Backend",
+            ["Local (FAISS + SQLite)", "Qdrant (Remote)"],
             index=0 if st.session_state.vector_db == "faiss" else 1
         )
-        
-        # Show current Qdrant URL (read-only info from .env)
+
+        if st.session_state.storage_backend != previous_storage_backend:
+            if st.session_state.storage_backend.startswith("Local"):
+                st.session_state.vector_db = "faiss"
+                st.session_state.chat_backend = "sqlite"
+            else:
+                st.session_state.vector_db = "qdrant"
+                st.session_state.chat_backend = "qdrant"
+
+            # IMPORTANT: Clear state when switching backends
+            st.session_state.prev_storage_backend = st.session_state.storage_backend
+            st.session_state.messages = []
+            st.session_state.current_chat_id = None
+            st.session_state.selected_model = None
+            st.session_state.uploaded_files_to_process = []  # ← Add this
+            st.rerun()
+
+        if "rag_enabled" not in st.session_state:
+            st.session_state["rag_enabled"] = True
+
+        # Add the checkbox (near model selection)
+        st.markdown("---")
+        st.session_state.rag_enabled = st.checkbox(
+            "📚 Enable (RAG)",
+            value=st.session_state.rag_enabled,
+            help="When enabled, the query is embedded and searched against uploaded documents."
+        )
+        st.markdown("---")
+
+        # Qdrant info
         if st.session_state.vector_db == "qdrant":
             if st.session_state.qdrant_url:
                 st.info("🔗 Qdrant URL found")
             else:
-                st.warning("Qdrant URL not found in .env")
+                st.warning("⚠️ Qdrant URL not found in .env")
             if st.session_state.qdrant_api_key:
-                st.success(f"Qdrant API Key loaded (ends with ...{st.session_state.qdrant_api_key[-4:]})")
+                st.success(f"✅ Qdrant API Key loaded (ends with ...{st.session_state.qdrant_api_key[-4:]})")
             else:
-                st.error("Qdrant API Key not found in .env")
+                st.error("❌ Qdrant API Key not found in .env")
 
         # OpenAI API key
-        with st.expander("API Keys"):
+        with st.expander("🔑 API Keys"):
             if st.session_state.openai_api_key:
-                st.success("OpenAI API Key loaded from .env")
+                st.success("✅ OpenAI API Key loaded from .env")
                 override_key = st.text_input(
                     "Override OpenAI API Key (optional)",
                     type="password",
@@ -139,7 +195,7 @@ def main():
                 )
                 if override_key:
                     st.session_state.openai_api_key = override_key
-                    st.success("Using custom API key")
+                    st.success("✅ Using custom API key")
             else:
                 api_key_input = st.text_input(
                     "Enter your OpenAI API Key",
@@ -147,14 +203,7 @@ def main():
                 )
                 if api_key_input:
                     st.session_state.openai_api_key = api_key_input
-                    st.success("API key saved")
-
-        st.write(f"👤 {username}")
-        if st.button("Logout"):
-            logout()
-            st.rerun()
-
-                   
+                    st.success("✅ API key saved")
 
     # --- Available Models ---
     try:
@@ -165,12 +214,12 @@ def main():
     available_models = ollama_models + openai_models
 
     if not available_models:
-        st.warning("No models available. Check Ollama server or OpenAI key")
+        st.warning("⚠️ No models available. Check Ollama server or OpenAI key")
         st.stop()
 
     disable_model_select = st.session_state.current_chat_id is not None
     selected_model = st.selectbox(
-        "Choose model",
+        "🧠 Choose model",
         available_models,
         index=available_models.index(st.session_state.selected_model) if st.session_state.selected_model in available_models else 0,
         disabled=disable_model_select
@@ -191,38 +240,65 @@ def main():
                 st.session_state.uploaded_files_to_process = uploaded
 
         if st.session_state.uploaded_files_to_process:
-            if st.button("Process Uploaded Files"):
-                # Create chat if it doesn't exist
-                if st.session_state.current_chat_id is None:
-                    st.session_state.current_chat_id = db.create_new_chat(st.session_state.selected_model)
-                    st.session_state.messages = []
-                
+            if st.button("📂 Process Uploaded Files"):
+                # ------------------ Create new chat if none exists ------------------
                 chat_id_to_process = st.session_state.current_chat_id
+                if chat_id_to_process is None:
+                    chat_id_to_process = db.create_new_chat(st.session_state.selected_model)
+                    st.session_state.current_chat_id = chat_id_to_process
+                    st.session_state.messages = []
 
-                existing_docs = db.get_chat_documents(chat_id_to_process)
+                print(f"[DEBUG] Processing with chat_id: {chat_id_to_process}")
+
+                # ------------------ Track duplicates in this batch ------------------
                 processed_files_in_batch = set()
 
                 for f in st.session_state.uploaded_files_to_process:
                     # Skip duplicates in this batch
                     if f.name in processed_files_in_batch:
-                        st.warning(f"{f.name} already exists in this batch. Skipping.")
+                        st.warning(f"⚠️ {f.name} already exists in this batch. Skipping.")
                         continue
                     processed_files_in_batch.add(f.name)
 
+                    # Extract text from file
                     content = extract_text_from_file(f)
-                    db.add_rag_doc(chat_id_to_process, f.name, content)
-                    sys_msg = f"File uploaded: {f.name}"
-                    db.add_message(chat_id_to_process, "system", sys_msg)
-                    st.session_state.messages.append({"role": "system", "content": sys_msg})
 
-                # Rebuild index with selected vector database
-                rebuild_rag_index(
-                    CHAT_DB_FILE, RAG_INDEX_DIR, chat_id_to_process, 
-                    st.session_state.selected_model, ollama_models, openai_models,
-                    vector_db=st.session_state.vector_db,
-                    qdrant_url=st.session_state.qdrant_url if st.session_state.vector_db == "qdrant" else None,
-                    qdrant_api_key=st.session_state.qdrant_api_key if st.session_state.vector_db == "qdrant" else None
-                )
+                    # --- Backend-specific handling ---
+                    if st.session_state.vector_db == "qdrant":
+                        # Compute embeddings
+                        if st.session_state.selected_model in ollama_models:
+                            embeddings = OllamaEmbeddings(model_name="nomic-embed-text")
+                        else:
+                            embeddings = OpenAIEmbeddings(
+                                model_name="text-embedding-3-large",
+                                api_key=st.session_state.openai_api_key
+                            )
+                        vector_data = embeddings.embed_documents([content])[0]  # single doc
+
+                        # Add document to Qdrant
+                        success, sys_msg = db.add_rag_doc(
+                            chat_id_to_process, f.name, content, vector_data=vector_data
+                        )
+                    else:
+                        # SQLite / FAISS
+                        success, sys_msg = db.add_rag_doc(chat_id_to_process, f.name, content)
+
+                    # --- Update messages & session state ---
+                    if success:
+                        db.add_message(chat_id_to_process, "assistant", sys_msg)
+                        st.session_state.messages.append({"role": "assistant", "content": sys_msg})
+                    else:
+                        st.warning(f"⚠️ {f.name} already uploaded in this chat. Skipping.")
+
+                    # ------------------ Rebuild FAISS index if needed ------------------
+                    if st.session_state.vector_db == "faiss":
+                        rebuild_rag_index(
+                            CHAT_DB_FILE, RAG_INDEX_DIR, chat_id_to_process,
+                            st.session_state.selected_model, ollama_models, openai_models,
+                            vector_db="faiss"
+                        )
+
+                # Clear uploaded files and rerun
                 st.session_state.uploaded_files_to_process = []
                 st.rerun()
 
@@ -236,41 +312,67 @@ def main():
 
     # --- Chat input ---
     if prompt := st.chat_input("Type your message here..."):
-        use_rag = False
-        enhanced_prompt = prompt
-        rag_content = ""
-        
-        # Create new chat if needed
+        # Create new chat if none exists
         if st.session_state.current_chat_id is None:
-            chat_id = db.create_new_chat(st.session_state.selected_model, prompt)
+            chat_id = db.create_new_chat(st.session_state.selected_model, first_message=prompt)
             st.session_state.current_chat_id = chat_id
         else:
             chat_id = st.session_state.current_chat_id
-        
+
+        # Add user message via db manager
         db.add_message(chat_id, "user", prompt)
+
+        # Append to session messages
         st.session_state.messages.append({"role": "user", "content": prompt, "used_rag": 0})
         with message_container.chat_message("user", avatar="😎"):
             st.markdown(prompt)
             
-        # --- RAG Enhancement ---
+        # --- RAG search ---
+        rag_content = ""
+        has_docs = False
         if st.session_state.rag_enabled:
-            rag_content, has_docs = get_relevant_rag(
-                CHAT_DB_FILE, RAG_INDEX_DIR, chat_id, prompt, 
-                st.session_state.selected_model, ollama_models, openai_models,
-                vector_db=st.session_state.vector_db,
-                qdrant_url=st.session_state.qdrant_url if st.session_state.vector_db == "qdrant" else None,
-                qdrant_api_key=st.session_state.qdrant_api_key if st.session_state.vector_db == "qdrant" else None
-            )
-            use_rag = has_docs
-        else:
-            rag_content = ""
-            use_rag = False
-        
-        if use_rag and rag_content.strip():
-            enhanced_prompt = f"""You have access to background documents that may be relevant to the user's question.
-Use the documents to answer if relevant. If the documents do not contain the answer, provide the answer from your own knowledge.
-Answer clearly and directly. Include explanations if needed. DO NOT reveal metadata unless explicitly asked.
+            # LOGIC SPLIT: Check if we are using Qdrant or Local
+            if st.session_state.vector_db == "qdrant":
+                # --- QDRANT SEARCH LOGIC ---
+                
+                # 1. Embed the user's prompt (Must use same model as upload!)
+                try:
+                    if st.session_state.selected_model in ollama_models:
+                        embeddings = OllamaEmbeddings(model_name="nomic-embed-text")
+                        query_vector = embeddings.embed_query(prompt)
+                    else:
+                        embeddings = OpenAIEmbeddings(
+                            model_name="text-embedding-3-large", 
+                            api_key=st.session_state.openai_api_key
+                        )
+                        # OpenAIEmbeddings typically returns a list of vectors, we take the first
+                        query_result = embeddings.embed_documents([prompt])
+                        query_vector = query_result[0] if query_result else []
 
+                    # 2. Search Qdrant
+                    if query_vector:
+                        # Import the new function locally or ensure it's imported at top
+                        from modules.qdrant_db import search_rag_docs_qdrant
+                        
+                        results = search_rag_docs_qdrant(chat_id, query_vector, limit=5)
+                        
+                        if results:
+                            rag_content = "\n\n".join(results)
+                            has_docs = True
+                except Exception as e:
+                    st.error(f"RAG Search failed: {e}")
+                    
+            else:
+                # --- LOCAL (FAISS) SEARCH LOGIC ---
+                # This uses your existing function for local/sqlite
+                rag_content, has_docs = get_relevant_rag(
+                    CHAT_DB_FILE, RAG_INDEX_DIR, chat_id, prompt,
+                    st.session_state.selected_model, ollama_models, openai_models,
+                    vector_db="faiss" # Force "faiss" here since we handled qdrant above
+                )
+
+        if has_docs and rag_content.strip():
+            enhanced_prompt = f"""You have access to background documents.
 Background documents:
 {rag_content}
 
@@ -302,10 +404,9 @@ Question: {prompt}"""
                             streamed_text += delta
                             display_text = ("📄 " if use_rag else "") + streamed_text
                             stream_placeholder.markdown(display_text)
-                    
+
                     db.add_message(chat_id, "assistant", streamed_text, used_rag=int(use_rag))
-                    st.session_state.messages.append({"role": "assistant", "content": streamed_text, "used_rag": int(use_rag)})
-                
+                    st.session_state.messages.append({"role":"assistant","content":streamed_text,"used_rag":int(use_rag)})
                 except Exception as e:
                     st.error(f"Error: {e}")
                     db.add_message(chat_id, "assistant", f"[ERROR] {e}", used_rag=0)
@@ -338,12 +439,11 @@ Question: {prompt}"""
                             streamed_text += delta
                             display_text = ("📄 " if use_rag else "") + streamed_text
                             stream_placeholder.markdown(display_text)
-
                 db.add_message(chat_id, "assistant", streamed_text, used_rag=int(use_rag))
-                st.session_state.messages.append({"role": "assistant", "content": streamed_text, "used_rag": int(use_rag)})
+                st.session_state.messages.append({"role":"assistant","content":streamed_text,"used_rag":int(use_rag)})
 
             except openai.AuthenticationError:
-                st.error("❌ Invalid OpenAI API key. Please check the key in the sidebar.")
+                st.error("❌ Invalid OpenAI API key.")
                 db.add_message(chat_id, "assistant", "[ERROR] Invalid API Key.", used_rag=0)
             except Exception as e:
                 st.error(f"OpenAI Error: {e}")
