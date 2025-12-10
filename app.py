@@ -32,7 +32,6 @@ if str(project_root) not in sys.path:
 # ------------------ CONFIG ------------------
 st.set_page_config(
     page_title="My Learning AI",
-    page_icon="💬",
     layout="wide",
 )
 
@@ -69,7 +68,7 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = val
 
-    st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
+    st.title("AI Playground with RAG (Ollama + OpenAI)")
 
     # ------------------ Initialize DBManager ------------------
     db = DBManager(
@@ -88,11 +87,11 @@ def main():
 
     # --- Sidebar ---
     with st.sidebar:
-        st.header("💾 Chat Sessions")
+        st.header("Chat Sessions")
 
         # >>> START: USER INFO AND LOGOUT BUTTON <<<
-        st.markdown(f"**👤 Logged in as: {username}**")
-        if st.button("🚪 Logout"):
+        st.markdown(f"**Logged in as: {username}**")
+        if st.button("Logout"):
             logout()
             st.rerun()
         st.markdown("---")
@@ -101,7 +100,7 @@ def main():
         # Load chats first
         all_chats = db.load_all_chats()
             
-        if st.button("🆕 New Chat"):
+        if st.button("New Chat"):
             st.session_state.update({
                 "messages": [],
                 "current_chat_id": None,
@@ -140,7 +139,7 @@ def main():
         previous_storage_backend = st.session_state.get("prev_storage_backend", "faiss")
 
         st.session_state.storage_backend = st.selectbox(
-            "🗄️ Storage Backend",
+            "Storage Backend",
             ["Local (FAISS + SQLite)", "Qdrant (Remote)"],
             index=0 if st.session_state.vector_db == "faiss" else 1
         )
@@ -167,7 +166,7 @@ def main():
         # Add the checkbox (near model selection)
         st.markdown("---")
         st.session_state.rag_enabled = st.checkbox(
-            "📚 Enable (RAG)",
+            "Enable (RAG)",
             value=st.session_state.rag_enabled,
             help="When enabled, the query is embedded and searched against uploaded documents."
         )
@@ -176,18 +175,18 @@ def main():
         # Qdrant info
         if st.session_state.vector_db == "qdrant":
             if st.session_state.qdrant_url:
-                st.info("🔗 Qdrant URL found")
+                st.info("Qdrant URL found")
             else:
-                st.warning("⚠️ Qdrant URL not found in .env")
+                st.warning("Qdrant URL not found in .env")
             if st.session_state.qdrant_api_key:
-                st.success(f"✅ Qdrant API Key loaded (ends with ...{st.session_state.qdrant_api_key[-4:]})")
+                st.success(f"Qdrant API Key loaded (ends with ...{st.session_state.qdrant_api_key[-4:]})")
             else:
-                st.error("❌ Qdrant API Key not found in .env")
+                st.error("Qdrant API Key not found in .env")
 
         # OpenAI API key
-        with st.expander("🔑 API Keys"):
+        with st.expander("API Keys"):
             if st.session_state.openai_api_key:
-                st.success("✅ OpenAI API Key loaded from .env")
+                st.success("penAI API Key loaded from .env")
                 override_key = st.text_input(
                     "Override OpenAI API Key (optional)",
                     type="password",
@@ -195,7 +194,7 @@ def main():
                 )
                 if override_key:
                     st.session_state.openai_api_key = override_key
-                    st.success("✅ Using custom API key")
+                    st.success("Using custom API key")
             else:
                 api_key_input = st.text_input(
                     "Enter your OpenAI API Key",
@@ -203,7 +202,7 @@ def main():
                 )
                 if api_key_input:
                     st.session_state.openai_api_key = api_key_input
-                    st.success("✅ API key saved")
+                    st.success("API key saved")
 
     # --- Available Models ---
     try:
@@ -214,12 +213,12 @@ def main():
     available_models = ollama_models + openai_models
 
     if not available_models:
-        st.warning("⚠️ No models available. Check Ollama server or OpenAI key")
+        st.warning("No models available. Check Ollama server or OpenAI key")
         st.stop()
 
     disable_model_select = st.session_state.current_chat_id is not None
     selected_model = st.selectbox(
-        "🧠 Choose model",
+        "Choose model",
         available_models,
         index=available_models.index(st.session_state.selected_model) if st.session_state.selected_model in available_models else 0,
         disabled=disable_model_select
@@ -229,7 +228,7 @@ def main():
 
     # --- File uploader ---
     if st.session_state.selected_model:
-        with st.expander("📤 Upload Documents"):
+        with st.expander("Upload Documents"):
             uploaded = st.file_uploader(
                 "Upload files",
                 type=["txt","pdf","pptx","docx","csv"],
@@ -240,7 +239,7 @@ def main():
                 st.session_state.uploaded_files_to_process = uploaded
 
         if st.session_state.uploaded_files_to_process:
-            if st.button("📂 Process Uploaded Files"):
+            if st.button("Process Uploaded Files"):
                 # ------------------ Create new chat if none exists ------------------
                 chat_id_to_process = st.session_state.current_chat_id
                 if chat_id_to_process is None:
@@ -256,7 +255,7 @@ def main():
                 for f in st.session_state.uploaded_files_to_process:
                     # Skip duplicates in this batch
                     if f.name in processed_files_in_batch:
-                        st.warning(f"⚠️ {f.name} already exists in this batch. Skipping.")
+                        st.warning(f"{f.name} already exists in this batch. Skipping.")
                         continue
                     processed_files_in_batch.add(f.name)
 
@@ -443,7 +442,7 @@ Question: {prompt}"""
                 st.session_state.messages.append({"role":"assistant","content":streamed_text,"used_rag":int(use_rag)})
 
             except openai.AuthenticationError:
-                st.error("❌ Invalid OpenAI API key.")
+                st.error("Invalid OpenAI API key.")
                 db.add_message(chat_id, "assistant", "[ERROR] Invalid API Key.", used_rag=0)
             except Exception as e:
                 st.error(f"OpenAI Error: {e}")
