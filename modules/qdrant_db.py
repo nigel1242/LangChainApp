@@ -3,14 +3,28 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance
 from qdrant_client.http.models import PointsSelector, PointStruct, Filter, FieldCondition, MatchValue, PayloadSchemaType
 from datetime import datetime
+from pathlib import Path
+from dotenv import load_dotenv
 import uuid
 import os
 
 # ------------------ Init Qdrant client ------------------
-QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+# ✅ Always load .env from project root
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_PATH = BASE_DIR / ".env"
 
-client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+load_dotenv(dotenv_path=ENV_PATH)
+
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+
+if not QDRANT_URL:
+    raise ValueError(f"❌ QDRANT_URL not found. Looked in: {ENV_PATH}")
+
+client = QdrantClient(
+    url=QDRANT_URL,
+    api_key=QDRANT_API_KEY
+)
 
 # ------------------ Constants ------------------
 DOC_COLLECTION = "rag_documents"
