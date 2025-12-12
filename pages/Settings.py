@@ -9,79 +9,134 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# New dictionary to map technical name (key) to friendly display name (value)
+MODEL_DISPLAY_NAMES = {
+    "nomic-embed-text:v1.5": "Nomic Embed (Embedding Model)",
+    "qwen2.5vl:7b": "Qwen 2.5 VL (Vision Model)",
+    "llama3:8b": "Llama3 8B (Base Model)",
+}
+MODELS_TO_OFFER = list(MODEL_DISPLAY_NAMES.keys())
+
+def download_model(model_name):
+    """Handles the model download process and Streamlit feedback."""
+    if not model_name:
+        st.warning("Model name is missing.", icon="⚠️")
+        return
+
+    try:
+        # Use a placeholder/spinner while pulling the model
+        with st.spinner(f"Downloading model: **{model_name}**... This may take a moment."):
+            ollama.pull(model_name)
+        
+        st.success(f"Downloaded model: {model_name}", icon="🎉")
+        st.balloons()
+        sleep(1)
+        st.rerun()
+    except Exception as e:
+        st.error(
+            f"""Failed to download model: {model_name}. Error: {str(e)}""",
+            icon="😳",
+        )
+
 def main():
     st.subheader("Model Management", divider="red", anchor=False)
 
-    st.subheader("Download Models", anchor=False)
-    model_name = st.text_input(
-        "Enter the name of the model to download ↓", placeholder="mistral"
-    )
-    if st.button(f"📥 :green[**Download**] :red[{model_name}]"):
-        if model_name:
-            try:
-                ollama.pull(model_name)
-                st.success(f"Downloaded model: {model_name}", icon="🎉")
-                st.balloons()
-                sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(
-                    f"""Failed to download model: {
-                    model_name}. Error: {str(e)}""",
-                    icon="😳",
-                )
-        else:
-            st.warning("Please enter a model name.", icon="⚠️")
-
-    st.divider()
-
-    st.subheader("Create model", anchor=False)
-    modelfile = st.text_area(
-        "Enter the modelfile",
-        height=100,
-        placeholder="""FROM mistral
-SYSTEM You are mario from super mario bros.""",
-    )
-    model_name = st.text_input(
-        "Enter the name of the model to create", placeholder="mario"
-    )
-    if st.button(f"🆕 Create Model {model_name}"):
-        if model_name and modelfile:
-            try:
-                ollama.create(model=model_name, modelfile=modelfile)
-                st.success(f"Created model: {model_name}", icon="✅")
-                st.balloons()
-                sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(
-                    f"""Failed to create model: {
-                         model_name}. Error: {str(e)}""",
-                    icon="😳",
-                )
-        else:
-            st.warning("Please enter a **model name** and **modelfile**", icon="⚠️")
-
-    st.divider()
-
-    st.subheader("Delete Models", anchor=False)
-    models_info = ollama.list()
-    available_models = [m.model for m in models_info["models"]]
+    # --- 1. Get List of Installed Models ---
+    installed_models = []
+    try:
+        models_info = ollama.list()
+        # installed_models contains full names like 'llama3:8b@sha256:...'
+        installed_models = [m.model for m in models_info["models"]]
+    except Exception as e:
+        st.error(f"Could not list available models. Ensure Ollama is running. Error: {str(e)}", icon="🛑")
     
-    if available_models:
-        selected_models = st.multiselect("Select models to delete", available_models)
-        if st.button("🗑️ :red[**Delete Selected Model(s)**]"):
-            for model in selected_models:
+    # --- 2. Download Models Section (Buttons with Disable Logic) ---
+    st.subheader("Download Models", anchor=False)
+    st.info("Click to download a model. Buttons are disabled if the model is already installed.", icon="👇")
+    
+    # Create a set of base names (without digest) for fast lookup in the download section
+    installed_model_bases = {m.split('@')[0] for m in installed_models}
+    
+    # Use columns to neatly arrange the download buttons
+    cols = st.columns(len(MODELS_TO_OFFER))
+    
+    for i, model_name in enumerate(MODELS_TO_OFFER):
+        display_name = MODEL_DISPLAY_NAMES.get(model_name, model_name)
+        
+        # Check if the model is already installed using the base name set
+        is_installed = model_name in installed_model_bases
+        
+        button_key = f"download_{model_name}"
+        
+        if is_installed:
+            button_label = f"✅ :gray[**Installed**] :gray[{display_name}]"
+        else:
+            button_label = f"📥 :green[**Download**] :red[{display_name}]"
+            
+        with cols[i]:
+            # Create a button for each specific model
+            if st.button(button_label, key=button_key, disabled=is_installed):
+                download_model(model_name)
+
+
+    st.divider()
+
+    # --- 3. Delete Models Section (Single Select Dropdown with Friendly Names) ---
+    st.subheader("Delete Models", anchor=False)
+    
+    if installed_models:
+        # Create a dictionary: {Friendly Name (or raw name): Raw Model Name for deletion}
+        delete_options_map = {}
+        for m_raw in installed_models:
+            
+            # --- Get the base name without SHA digest ---
+            base_name_with_tag = m_raw.split('@')[0]
+            
+            # Check if we have a friendly name for this model/tag
+            if base_name_with_tag in MODEL_DISPLAY_NAMES:
+                # Use the friendly name directly (FIX APPLIED HERE)
+                display_key = MODEL_DISPLAY_NAMES[base_name_with_tag]
+            else:
+                # If it's a model not on our offered list, use the raw name
+                display_key = m_raw
+            
+            # Handle potential collision of display keys (e.g., if you install two tags of llama3 that aren't on your list)
+            # This ensures every installed model has a unique key for the dropdown
+            # For offered models, this won't change the display key.
+            if display_key in delete_options_map:
+                 # Append the raw name's last tag/digest part to make it unique
+                 unique_suffix = base_name_with_tag.split(':')[-1]
+                 if unique_suffix == base_name_with_tag: # Handles untagged models
+                      unique_suffix = m_raw
+                 display_key = f"{display_key} (ID: {unique_suffix})"
+
+            # Map the unique display key back to the raw name needed for ollama.delete()
+            delete_options_map[display_key] = m_raw
+             
+        delete_display_names = list(delete_options_map.keys())
+
+        selected_delete_display_name = st.selectbox(
+            "Select a model to delete", 
+            options=["-- Select a Model --"] + delete_display_names,
+            key="delete_selectbox"
+        )
+
+        model_to_delete = None
+        if selected_delete_display_name != "-- Select a Model --":
+            model_to_delete = delete_options_map[selected_delete_display_name]
+
+        if model_to_delete:
+            if st.button(f"🗑️ :red[**Delete**] :red[{selected_delete_display_name}]", key="delete_button"):
+                # Call delete function on the technical model name
                 try:
-                    ollama.delete(model)
-                    st.success(f"Deleted model: {model}", icon="🎉")
+                    ollama.delete(model_to_delete)
+                    st.success(f"Deleted model: {model_to_delete}", icon="🎉")
                     st.balloons()
                     sleep(1)
                     st.rerun()
                 except Exception as e:
                     st.error(
-                        f"""Failed to delete model: {
-                        model}. Error: {str(e)}""",
+                        f"""Failed to delete model: {model_to_delete}. Error: {str(e)}""",
                         icon="😳",
                     )
     else:
