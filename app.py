@@ -17,11 +17,10 @@ from modules.functions import (
     rebuild_rag_index,
     get_relevant_rag
 )
-# >>> START: LOGIN INTEGRATION <<<
-from modules.login import check_authentication, login_page, logout
-# >>> END: LOGIN INTEGRATION <<<
 
-# Load environment variables
+from modules.login import check_authentication, login_page, logout
+
+
 load_dotenv()
 
 # Add project root to Python path
@@ -41,16 +40,21 @@ os.makedirs(RAG_INDEX_DIR, exist_ok=True)
 
 # ---------------------- MAIN APP -----------------------
 def main():
-    # >>> START: AUTHENTICATION GATE <<<
     is_authenticated, username = check_authentication()
 
     if not is_authenticated:
-        # If not authenticated, show the login/signup UI and stop execution
+        # Hide sidebar when not logged in
+        st.markdown("""
+            <style>
+                [data-testid="stSidebar"] {
+                    display: none;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+        
         login_page()
         st.stop()
-    # >>> END: AUTHENTICATION GATE <<<
 
-    # ------------------ Initialize session state ------------------
     defaults = {
         "chat_backend": "sqlite",
         "vector_db": "faiss",
@@ -186,7 +190,7 @@ def main():
         # OpenAI API key
         with st.expander("API Keys"):
             if st.session_state.openai_api_key:
-                st.success("penAI API Key loaded from .env")
+                st.success("OpenAI API Key loaded from .env")
                 override_key = st.text_input(
                     "Override OpenAI API Key (optional)",
                     type="password",
