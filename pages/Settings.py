@@ -1,3 +1,4 @@
+# settings.py (Updated with Voice Selection)
 import streamlit as st
 import ollama
 from time import sleep
@@ -40,6 +41,22 @@ def download_model(model_name):
 
 def main():
     st.subheader("Model Management", divider="red", anchor=False)
+
+    # --- VOICE SELECTION SETTINGS ---
+    st.subheader("Text-to-Speech (TTS) Voice Selection", anchor=False)
+    voice_options = ["alloy", "verse", "echo", "sage"]
+    current_voice = st.session_state.get("tts_voice", "alloy")
+
+    st.session_state.tts_voice = st.selectbox(
+        "🎧 Select Voice for Answer Audio (OpenAI TTS)",
+        voice_options,
+        index=voice_options.index(current_voice)
+        if current_voice in voice_options
+        else 0,
+        help="This voice will be used for generated audio responses."
+    )
+    st.info(f"Current TTS Voice: **{st.session_state.tts_voice}**")
+    st.divider()
 
     # --- 1. Get List of Installed Models ---
     installed_models = []
@@ -100,19 +117,16 @@ def main():
                 # If it's a model not on our offered list, use the raw name
                 display_key = m_raw
             
-            # Handle potential collision of display keys (e.g., if you install two tags of llama3 that aren't on your list)
-            # This ensures every installed model has a unique key for the dropdown
-            # For offered models, this won't change the display key.
+            # Handle potential collision of display keys
             if display_key in delete_options_map:
-                 # Append the raw name's last tag/digest part to make it unique
-                 unique_suffix = base_name_with_tag.split(':')[-1]
-                 if unique_suffix == base_name_with_tag: # Handles untagged models
-                      unique_suffix = m_raw
-                 display_key = f"{display_key} (ID: {unique_suffix})"
+                unique_suffix = base_name_with_tag.split(':')[-1]
+                if unique_suffix == base_name_with_tag: # Handles untagged models
+                    unique_suffix = m_raw
+                display_key = f"{display_key} (ID: {unique_suffix})"
 
             # Map the unique display key back to the raw name needed for ollama.delete()
             delete_options_map[display_key] = m_raw
-             
+            
         delete_display_names = list(delete_options_map.keys())
 
         selected_delete_display_name = st.selectbox(
