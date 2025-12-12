@@ -1,7 +1,8 @@
-# pages/quiz.py
+# pages/quiz.py (Revised: Model Selector in Main Body)
 
 import os
 import time
+from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -10,6 +11,11 @@ import ollama
 from openai import OpenAI
 import openai # Needed for the AuthenticationError in catch blocks
 
+# --- Local Module Imports ---
+from modules.login import check_authentication, login_page, logout
+from modules.functions import (
+    rebuild_rag_index, # <-- Used for integrating with Subject Tutor RAG
+)
 from modules.quizstats.subject_store import (
     init_subject_db,
     list_subjects,
@@ -17,7 +23,7 @@ from modules.quizstats.subject_store import (
     get_subject_meta,
     save_subject_meta,
     ensure_subject_folders,
-    delete_subject,      # 🔹 NEW
+    delete_subject,
 )
 from modules.quizstats.file_utils import (
     save_uploaded_files,
@@ -30,34 +36,49 @@ from modules.quizstats.quiz_engine import build_quiz_from_corpus
 from modules.quizstats.progress_store import (
     init_stats_db,
     record_attempt,
-    clear_subject_stats,     # 🔹 NEW
+    clear_subject_stats,
 )
+
+# --- GLOBAL CONSTANTS (Copied from app.py for RAG functions) ---
+CHAT_DB_FILE = "chat_playground.db"
+RAG_INDEX_DIR = "rag_indices"
+os.makedirs(RAG_INDEX_DIR, exist_ok=True)
+
 
 # ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="Quiz Builder", page_icon="📝", layout="wide")
 load_dotenv()
 
+# ---------- AUTHENTICATION GATE (Unified with App.py) ----------
+is_authenticated, username = check_authentication()
+
+if not is_authenticated:
+    login_page()
+    st.stop()
+    
 # ---------- SESSION ----------
-# Ensure keys exist for the quiz page, including a key for the API key if missing
-if "openai_api_key" not in st.session_state:
-    st.session_state["openai_api_key"] = os.getenv("OPENAI_API_KEY", "")
+# Ensure keys exist, using the structure from app.py
+defaults = {
+    "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
+    "selected_model": None, # Top-level key for LLM
+}
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
 
 # Update the quiz_state initialization
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
-        # Removed "provider" and "model_name" here as they will be derived from the selector
-        "openai_api_key": st.session_state["openai_api_key"], # Use the central key
         "selected_subject": None,
         "new_subject_name": "",
         "uploads_buffer": [],
         "quiz": [],
         "current_idx": 0,
         "score": 0,
-        "answered": {},   # q_idx -> {"picked": int, "correct": bool, "already_counted": bool}
-        "submitted": {},  # q_idx -> bool
+        "answered": {},
+        "submitted": {},
         "corpus": "",
-        "show_image": {}, # q_idx -> bool (user clicked 'show context')
-        "selected_model": None, # New state variable to match app.py
+        "show_image": {},
     }
 
 S = st.session_state.quiz_state
@@ -65,55 +86,78 @@ S = st.session_state.quiz_state
 # make sure stats DB exists
 init_stats_db()
 
+
+# ---------- SIDEBAR (Simplified to only contain Auth/Config) ----------
+with st.sidebar:
+    st.markdown(f"**Logged in as: {username}**")
+    if st.button("Logout"):
+        logout()
+        st.rerun()
+    st.markdown("---")
+
+    # 1. --- API Key Expander (Copied from app.py) ---
+    st.header("🔑 API Keys")
+    with st.expander("Manage Keys"):
+        # The key check uses the top-level session state key
+        if st.session_state.openai_api_key:
+            st.success("OpenAI API Key loaded from .env")
+            override_key = st.text_input(
+                "Override OpenAI API Key (optional)",
+                type="password",
+                placeholder="Leave empty to use .env key",
+                key="quiz_openai_override"
+            )
+            if override_key:
+                st.session_state.openai_api_key = override_key
+                st.success("Using custom API key")
+        else:
+            api_key_input = st.text_input(
+                "Enter your OpenAI API Key",
+                type="password",
+                key="quiz_openai_input"
+            )
+            if api_key_input:
+                st.session_state.openai_api_key = api_key_input
+                st.success("API key saved")
+                st.rerun()
+                
+# ---------- SIDEBAR END ----------
+
 # ---------- HEADER ----------
 st.title("📝 Quiz Builder (Subjects + Files + 10 MCQs)")
 
-# >>> START: UNIFIED MODEL SELECTOR (Copied from app.py) <<<
+# >>> START: UNIFIED MODEL SELECTOR (IN MAIN BODY, like app.py) <<<
 # --- Available Models ---
-# The logic must run outside the expander to enable model switching.
 try:
     ollama_models = tuple(m['model'] for m in ollama.list().get("models", []))
 except Exception:
     ollama_models = ()
     
-# Use the session state key defined above/in .env
 openai_models = ("gpt-3.5-turbo","gpt-4") if st.session_state["openai_api_key"] else ()
 available_models = ollama_models + openai_models
 
 if not available_models:
     st.warning("⚠️ No models available. Check Ollama server or OpenAI key")
-    # st.stop() # Removed st.stop() so users can enter key in the sidebar if needed.
-    
-# >>> START: NEW DEFAULT MODEL INITIALIZATION <<<
-if available_models and S["selected_model"] is None:
-    # Set the default model to the first available model
-    S["selected_model"] = available_models[0]
-elif S["selected_model"] is not None and S["selected_model"] not in available_models:
-    # If a previously selected model is no longer available, reset to a valid one
-    S["selected_model"] = available_models[0] if available_models else None
-# >>> END: NEW DEFAULT MODEL INITIALIZATION <<<
 
-with st.expander("⚙️ Model / Provider"):
-    # Use the session state variable for selection
-    S["selected_model"] = st.selectbox(
-        "🧠 Choose model for RAG/Quiz Generation",
-        available_models,
-        index=available_models.index(S["selected_model"]) if S["selected_model"] in available_models else 0,
-        key="quiz_model_selector"
-    )
+# Set default selected_model if none is chosen
+if available_models and st.session_state.selected_model is None:
+    st.session_state.selected_model = available_models[0]
+elif st.session_state.selected_model not in available_models:
+    st.session_state.selected_model = available_models[0] if available_models else None
 
-    # Note: If you want to use the API key expander from app.py, you should move that logic here.
-    # For now, we will just display a message about the selected model.
-    if S["selected_model"]:
-        st.info(f"Using model: **{S['selected_model']}**")
-    
-    st.caption(
-        "This page uses a built-in quiz generator that calls GPT-4o-mini when an "
-        "OPENAI_API_KEY is set. The selected model will be used for RAG/Quiz context creation."
-    )
-    
+# --- Model Selector ---
+selected_model = st.selectbox(
+    "🧠 Choose model for Quiz Generation",
+    available_models,
+    index=available_models.index(st.session_state.selected_model) 
+    if st.session_state.selected_model in available_models else 0,
+    key="quiz_model_selector_main"
+)
+st.session_state.selected_model = selected_model # Update session state
+
 st.markdown("---")
 # >>> END: UNIFIED MODEL SELECTOR <<<
+
 
 # ---------- SUBJECTS: CREATE / SELECT ----------
 init_subject_db()
@@ -162,7 +206,7 @@ with left:
                 st.warning(f"Could not clear stats for subject: {e}")
 
             # 2) Delete subject from DB + disk
-            ok, msg = delete_subject(S["selected_subject"])
+            ok, msg = delete_subject(S["selected_subject"]) 
             if ok:
                 st.success(msg + " All quiz stats for this subject were cleared.")
                 # 3) Reset local state
@@ -217,17 +261,39 @@ if uploaded:
 if st.button("📦 Process Uploaded Files"):
     if not S["uploads_buffer"]:
         st.warning("No files selected.")
+    elif not st.session_state.selected_model:
+        st.error("Please select a model above before processing.")
     else:
-        saved = save_uploaded_files(S["selected_subject"], S["uploads_buffer"])
-        S["uploads_buffer"] = []
-        corpus = extract_corpus_for_subject(S["selected_subject"])
-        meta = get_subject_meta(S["selected_subject"]) or {}
-        meta["last_indexed_ms"] = int(time.time() * 1000)
-        meta["char_count"] = len(corpus)
-        save_subject_meta(S["selected_subject"], meta)
-        st.success(
-            f"Processed {len(saved)} file(s). Indexed {len(corpus):,} characters."
-        )
+        with st.spinner("Processing files and rebuilding RAG index..."):
+            # Step 1: Save files and extract corpus
+            saved = save_uploaded_files(S["selected_subject"], S["uploads_buffer"])
+            S["uploads_buffer"] = []
+            corpus = extract_corpus_for_subject(S["selected_subject"])
+            
+            # Step 2: Save metadata
+            meta = get_subject_meta(S["selected_subject"]) or {}
+            meta["last_indexed_ms"] = int(time.time() * 1000)
+            meta["char_count"] = len(corpus)
+            save_subject_meta(S["selected_subject"], meta)
+            
+            st.success(f"Processed {len(saved)} file(s). Indexed {len(corpus):,} characters.")
+            
+            # Step 3: Trigger Central RAG Index Rebuild (Crucial for Tutor page)
+            try:
+                # We use the subject name as the index identifier for FAISS
+                rebuild_rag_index(
+                    CHAT_DB_FILE, RAG_INDEX_DIR, 
+                    chat_id_to_process=S["selected_subject"], 
+                    selected_model=st.session_state.selected_model, 
+                    ollama_models=ollama_models, 
+                    openai_models=openai_models,
+                    vector_db="faiss" # Assuming local FAISS is used for subject RAG
+                )
+                st.success("RAG Index updated for Subject Tutor.")
+            except Exception as e:
+                st.warning(f"Failed to rebuild RAG index for Subject Tutor: {e}")
+
+        st.rerun()
 
 # ---------- BUILD / START QUIZ ----------
 st.markdown("### 🧠 Generate Quiz (10 MCQs)")
@@ -236,19 +302,16 @@ if st.button("🎲 Generate 10 Questions"):
     if not corpus.strip():
         st.warning("No text in this subject yet. Please upload/process files first.")
     else:
-        # Check if a model is selected before generating
-        if not S["selected_model"]:
-            st.error("Please select a model in the Model / Provider section first.")
+        # Check central model state
+        if not st.session_state.selected_model:
+            st.error("Please select a model above first.")
             st.stop()
             
         quiz = build_quiz_from_corpus(
             corpus_text=corpus,
             subject=S["selected_subject"],
             n_questions=10,
-            # >>> PASS SELECTED MODEL TO QUIZ ENGINE <<<
-            model_name=S["selected_model"],
-            # You might need to pass the API key if build_quiz_from_corpus uses it:
-            # openai_api_key=st.session_state["openai_api_key"] 
+            model_name=st.session_state.selected_model, # Use central state model
         )
         S["quiz"] = quiz
         S["current_idx"] = 0
