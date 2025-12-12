@@ -6,16 +6,13 @@ from pathlib import Path
 
 import streamlit as st
 from dotenv import load_dotenv
-# >>> IMPORT OLLAMA AND OPENAI LIBRARIES <<<
 import ollama
 from openai import OpenAI
-import openai # Needed for the AuthenticationError in catch blocks
+import openai
 
 # --- Local Module Imports ---
 from modules.login import check_authentication, login_page, logout
-from modules.functions import (
-    rebuild_rag_index, # <-- Used for integrating with Subject Tutor RAG
-)
+
 from modules.quizstats.subject_store import (
     init_subject_db,
     list_subjects,
@@ -277,21 +274,6 @@ if st.button("📦 Process Uploaded Files"):
             save_subject_meta(S["selected_subject"], meta)
             
             st.success(f"Processed {len(saved)} file(s). Indexed {len(corpus):,} characters.")
-            
-            # Step 3: Trigger Central RAG Index Rebuild (Crucial for Tutor page)
-            try:
-                # We use the subject name as the index identifier for FAISS
-                rebuild_rag_index(
-                    CHAT_DB_FILE, RAG_INDEX_DIR, 
-                    chat_id_to_process=S["selected_subject"], 
-                    selected_model=st.session_state.selected_model, 
-                    ollama_models=ollama_models, 
-                    openai_models=openai_models,
-                    vector_db="faiss" # Assuming local FAISS is used for subject RAG
-                )
-                st.success("RAG Index updated for Subject Tutor.")
-            except Exception as e:
-                st.warning(f"Failed to rebuild RAG index for Subject Tutor: {e}")
 
         st.rerun()
 
