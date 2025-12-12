@@ -127,8 +127,9 @@ def rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_
     if not all_docs:
         return
 
+    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
     if model_name in ollama_models:
-        embeddings = OllamaEmbeddings(model_name="nomic-embed-text")
+        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
     elif model_name in openai_models:
         if not st.session_state.openai_api_key:
             st.error("OpenAI API key is missing.")
@@ -146,7 +147,8 @@ def get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, o
     if not os.path.exists(faiss_index_path):
         return "", False
 
-    embeddings = OllamaEmbeddings("nomic-embed-text") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
+    embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
 
     faiss_index = FAISS.load_local(faiss_index_path, embeddings, allow_dangerous_deserialization=True)
     docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
@@ -190,7 +192,8 @@ def rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_mo
     if not all_docs:
         return
 
-    embeddings = OllamaEmbeddings("nomic-embed-text") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
+    embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
 
     client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
     collection_name = f"chat_{chat_id}"
@@ -202,7 +205,7 @@ def rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_mo
         embedding_dim = len(embeddings.embed_query("test"))
         client.create_collection(collection_name=collection_name, vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE))
 
-    # Add documents
+    # Add documents (This is a BULK operation, making it fast!)
     vector_store = QdrantVectorStore(client=client, collection_name=collection_name, embedding=embeddings)
     vector_store.add_documents(all_docs)
 
@@ -210,7 +213,8 @@ def get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, oll
     if not QDRANT_AVAILABLE:
         return "", False
 
-    embeddings = OllamaEmbeddings("nomic-embed-text") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
+    embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
     client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
     collection_name = f"chat_{chat_id}"
 
