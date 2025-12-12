@@ -1,4 +1,4 @@
-# app.py (Final Code with Voice Selection Removed from Sidebar)
+# app.py (Working version with Qdrant Chunking fix)
 from __future__ import annotations
 
 import os
@@ -21,6 +21,8 @@ from modules.functions import (
     extract_text_from_file,
     rebuild_rag_index,
     get_relevant_rag,
+    # <<< CRITICAL FIX: Import the splitter class >>>
+    RecursiveCharacterTextSplitter,
 )
 from modules.login import check_authentication, login_page, logout
 
@@ -65,7 +67,6 @@ def get_openai_client() -> OpenAI:
 def transcribe_audio_bytes(audio_bytes: bytes) -> str:
     """
     Use OpenAI Whisper to convert recorded audio to text.
-    audio_recorder_streamlit returns WAV bytes, so we save as .wav.
     """
     client = get_openai_client()
 
@@ -78,7 +79,7 @@ def transcribe_audio_bytes(audio_bytes: bytes) -> str:
             resp = client.audio.transcriptions.create(
                 model="whisper-1",
                 file=f,
-                language="en",  # optional
+                language="en", 
             )
         return (resp.text or "").strip()
     finally:
@@ -91,7 +92,6 @@ def transcribe_audio_bytes(audio_bytes: bytes) -> str:
 def speak_text(answer: str) -> bytes | None:
     """
     Use OpenAI TTS to turn a text answer into MP3 bytes.
-    Returns None on error. Does NOT affect chat history.
     """
     answer = (answer or "").strip()
     if not answer:
@@ -117,10 +117,16 @@ def speak_text(answer: str) -> bytes | None:
 
 # ---------------------- MAIN APP -----------------------
 def main():
+    # Placeholder definitions for audio utilities
+    def clear_tts():
+        st.session_state.tts_audio_bytes = None
+        st.session_state.tts_audio_for = ""
+    # Placeholder for message container
+    message_container = st.container()
+
     # -------- AUTHENTICATION GATE + SIDEBAR HIDING --------
     is_authenticated, username = check_authentication()
     if not is_authenticated:
-        # Hide sidebar when not logged in using markdown/CSS injection
         st.markdown("""
             <style>
                 [data-testid="stSidebar"] {
@@ -128,7 +134,6 @@ def main():
                 }
             </style>
         """, unsafe_allow_html=True)
-
         login_page()
         st.stop()
 
@@ -144,28 +149,20 @@ def main():
         "uploaded_files_to_process": [],
         "rag_enabled": True,
         "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
-        # Voice-related state
-        "tts_voice": "alloy", # Default voice kept in state
-        "last_audio_bytes": None,  # for mic recorder de-dupe
-        "chat_question_input": "",  # kept, but no longer used as a visible text box
+        "tts_voice": "alloy",
+        "last_audio_bytes": None,
+        "chat_question_input": "",
         "prev_storage_backend": "Local (FAISS + SQLite)",
-        # On-demand TTS state
         "tts_audio_bytes": None,
         "tts_audio_for": "",
         "last_assistant_text": "",
-        # Voice-to-text auto-send
         "voice_prompt": "",
         "trigger_send": False,
-        # Temp state for prompt handling (Used for two-step submit)
         "temp_prompt": None,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
-
-    def clear_tts():
-        st.session_state.tts_audio_bytes = None
-        st.session_state.tts_audio_for = ""
 
     st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
 
@@ -178,7 +175,6 @@ def main():
     )
 
     # -------- Restore chat from DB if needed --------
-    # Check for current_chat_id AND if messages is unexpectedly empty
     if st.session_state.get("current_chat_id") and not st.session_state.get("messages"):
         msgs, model = db.load_chat(st.session_state.current_chat_id)
         st.session_state["messages"] = msgs
@@ -229,7 +225,6 @@ def main():
                             "trigger_send": False,
                         }
                     )
-                    # reset on-demand audio + last assistant text
                     clear_tts()
                     last_a = ""
                     for m in reversed(msgs):
@@ -240,6 +235,7 @@ def main():
 
             with col2:
                 if st.button("✕", key=f"delete_{chat_id}"):
+                    # Use DBManager's delete function, which handles both backends
                     db.delete_chat(chat_id, rag_index_dir=RAG_INDEX_DIR)
                     st.session_state.update(
                         {
@@ -329,8 +325,6 @@ def main():
                     st.session_state.openai_api_key = api_key_input
                     st.success("✅ API key saved")
 
-        # Voice selection REMOVED from here and MOVED to settings.py
-        
     # ---------------- MODELS AVAILABLE ----------------
     try:
         ollama_models = tuple(m["model"] for m in ollama.list().get("models", []))
@@ -377,6 +371,7 @@ def main():
             if st.button("📂 Process Uploaded Files"):
                 chat_id_to_process = st.session_state.current_chat_id
                 if chat_id_to_process is None:
+                    # Use DBManager: db.create_new_chat
                     chat_id_to_process = db.create_new_chat(st.session_state.selected_model)
                     st.session_state.current_chat_id = chat_id_to_process
                     st.session_state.messages = []
@@ -391,20 +386,52 @@ def main():
 
                     content = extract_text_from_file(f)
 
-                    if st.session_state.vector_db == "qdrant":
-                        if st.session_state.selected_model in ollama_models:
-                            # NOTE: Using the user-specified model version for indexing
-                            embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5") 
-                        else:
-                            embeddings = OpenAIEmbeddings(
-                                model_name="text-embedding-3-large",
-                                api_key=st.session_state.openai_api_key,
-                            )
-                        vector_data = embeddings.embed_documents([content])[0]
-                        success, sys_msg = db.add_rag_doc(
-                            chat_id_to_process, f.name, content, vector_data=vector_data
-                        )
+                    # --- Setup Embeddings Model (Common for Qdrant/FAISS) ---
+                    if st.session_state.selected_model in ollama_models:
+                        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
                     else:
+                        embeddings = OpenAIEmbeddings(
+                            model_name="text-embedding-3-large",
+                            api_key=st.session_state.openai_api_key,
+                        )
+
+                    if st.session_state.vector_db == "qdrant":
+                        # <<< START OF CRITICAL FIX: CHUNKING LOGIC >>>
+                        # 1. CHUNK THE DOCUMENT 
+                        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+                        chunks = splitter.split_text(content)
+                        
+                        all_success = True
+                        
+                        # 2. LOOP & EMBED EACH CHUNK
+                        with st.spinner(f"Embedding and uploading {len(chunks)} chunks for {f.name}..."):
+                            for i, chunk in enumerate(chunks):
+                                try:
+                                    # Embed the small chunk (Resolves the context length error)
+                                    vector_data = embeddings.embed_documents([chunk])[0]
+                                    
+                                    # 3. Add chunk to Qdrant - Use DBManager: db.add_rag_doc
+                                    success, _ = db.add_rag_doc(
+                                        chat_id_to_process, 
+                                        f"{f.name} (chunk {i+1}/{len(chunks)})", 
+                                        chunk, 
+                                        vector_data=vector_data
+                                    )
+                                    if not success: all_success = False
+                                except Exception as e:
+                                    st.error(f"Error processing chunk {i+1} of {f.name}: {e}")
+                                    all_success = False
+                        
+                        if all_success:
+                            sys_msg = f"📄 {f.name} indexed into Qdrant successfully ({len(chunks)} chunks)! 🎉"
+                        else:
+                            sys_msg = f"⚠️ Finished indexing {f.name}, but some chunks failed to upload to Qdrant."
+                        
+                        success = all_success # Set overall success flag based on chunking process
+                        # <<< END OF CRITICAL FIX: CHUNKING LOGIC >>>
+
+                    else:
+                        # SQLite / FAISS path - Use DBManager: db.add_rag_doc
                         success, sys_msg = db.add_rag_doc(chat_id_to_process, f.name, content)
 
                     if success:
@@ -429,7 +456,6 @@ def main():
 
     # ---------------- CHAT HISTORY DISPLAY ----------------
     message_container = st.container()
-    # Single placeholder for ALL TTS audio: latest answer only
     tts_placeholder = st.empty()
 
     for msg in st.session_state.messages:
@@ -441,34 +467,26 @@ def main():
     # ---------------- ON-DEMAND TTS CONTROLS (Latest assistant only) ----------------
     latest = (st.session_state.get("last_assistant_text") or "").strip()
     
-    # Check if audio is currently loaded for the latest text
     has_audio_bytes = st.session_state.tts_audio_bytes is not None and st.session_state.tts_audio_for == latest
 
     if latest:
-        # Use columns for layout control.
         c1, c_spacer = st.columns([1, 7], vertical_alignment="center")
         
         with c1:
-            # Display the "Listen" button only if audio bytes have NOT been generated yet
             if not has_audio_bytes:
                 if st.button("🔊 Listen", use_container_width=True):
-                    # 1. Generate the audio bytes
                     st.session_state.tts_audio_bytes = speak_text(latest)
                     st.session_state.tts_audio_for = latest
-                    # 2. Rerun to hide this button and display the audio player
                     st.rerun()
 
-        # Display the audio player if bytes are present (and the button is now hidden)
         if has_audio_bytes:
             tts_placeholder.audio(st.session_state.tts_audio_bytes, format="audio/mp3")
 
     # ---------------- INPUT ROW: CHAT (Enter) + MIC ----------------
     st.markdown("### Ask with text or voice")
 
-    # --- Restoring Original Input Layout ---
     col_text, col_mic = st.columns([7, 1])
 
-    # MIC on the RIGHT – transcribe; auto-sends as a prompt (no audio history)
     with col_mic:
         st.caption("🎙 Tap to record")
         audio_bytes = audio_recorder(
@@ -484,50 +502,41 @@ def main():
             with st.spinner("Transcribing…"):
                 text_from_voice = transcribe_audio_bytes(audio_bytes)
             if text_from_voice:
-                # show ephemeral preview (NOT saved to DB)
                 with message_container.chat_message("user", avatar="🎤"):
                     st.markdown(f"**(Voice to text):** {text_from_voice}")
 
-                # auto-send voice as next prompt
                 st.session_state.voice_prompt = text_from_voice
                 st.session_state.trigger_send = True
                 st.rerun()
         except Exception as e:
             st.error(f"Transcription failed: {e}")
 
-    # TEXT on the LEFT – Enter submits
     with col_text:
-        # Placing st.chat_input back into the column
         typed_prompt = st.chat_input(
             "Type your message and press Enter…",
             key="main_chat_input"
         )
 
     # --- IMMEDIATE INPUT HANDLING (Captures input, clears audio, forces quick rerun) ---
-    # NOTE: The temp_prompt state variable is kept to manage the two-step submission process.
     prompt = (typed_prompt or "").strip()
     if prompt or st.session_state.get("trigger_send"):
         
-        # 1. Capture prompt (handling both text and voice paths)
         if not prompt and st.session_state.get("trigger_send"):
             prompt = (st.session_state.get("voice_prompt") or "").strip()
             st.session_state.trigger_send = False
             st.session_state.voice_prompt = ""
         
         if prompt:
-            # 2. Store prompt in temp state and CLEAR AUDIO STATE immediately
             st.session_state.temp_prompt = prompt
             st.session_state.last_assistant_text = ""
             clear_tts() 
-            
-            # 3. Force RERUN to immediately clear the audio player and old messages
             st.rerun()
 
 
     # ---------------- HANDLE RAG/LLM PROCESSING (AFTER audio clear rerun) ----------------
     if st.session_state.get("temp_prompt"):
         prompt = st.session_state.temp_prompt
-        st.session_state.temp_prompt = None # Clear temp state immediately
+        st.session_state.temp_prompt = None
 
         # Create new chat if needed
         if st.session_state.current_chat_id is None:
@@ -549,7 +558,6 @@ def main():
             if st.session_state.vector_db == "qdrant" and HAS_QDRANT_HELPER:
                 try:
                     if st.session_state.selected_model in ollama_models:
-                        # NOTE: Using the user-specified model version for query
                         embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5") 
                         query_vector = embeddings.embed_query(prompt)
                     else:
@@ -591,7 +599,6 @@ Question: {prompt}"""
                 "⚠️ RAG could not find relevant documents. "
                 "Answering based on model knowledge only."
             )
-            # Note: Do NOT add this sys_msg to messages here, let the LLM block handle the response stream.
             enhanced_prompt = prompt
             use_rag = False
             
@@ -600,7 +607,6 @@ Question: {prompt}"""
             avatar = "🤖"
             streamed_text = ""
             if not use_rag:
-                # Add the RAG failure message only before starting the LLM stream if no docs found
                 st.session_state.messages.append({"role": "assistant", "content": sys_msg, "used_rag": 0})
                 with message_container.chat_message("assistant", avatar=avatar):
                     st.markdown(sys_msg)
@@ -641,14 +647,12 @@ Question: {prompt}"""
                     {"role": m["role"], "content": m["content"]}
                     for m in st.session_state.messages
                 ]
-                # Since the user message was already added, we update the last user message with enhanced_prompt
                 if use_rag:
                     for i in range(len(messages_for_openai) - 1, -1, -1):
                         if messages_for_openai[i]["role"] == "user":
                             messages_for_openai[i]["content"] = enhanced_prompt
                             break
                 else:
-                    # Add RAG failure message before calling OpenAI
                     st.session_state.messages.append({"role": "assistant", "content": sys_msg, "used_rag": 0})
                     with message_container.chat_message("assistant", avatar="🤖"):
                         st.markdown(sys_msg)
