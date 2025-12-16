@@ -1,6 +1,8 @@
 # modules/db.py
 import sqlite3
 import os
+import shutil
+from modules.functions import unload_faiss_index 
 
 def init_db_sqlite(db_file: str):
     """Initializes the main chat database."""
@@ -114,17 +116,25 @@ def delete_chat_sqlite(db_file: str, chat_id: int, rag_index_dir: str = None):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
 
-    # Delete messages
     cursor.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
-    # Delete RAG docs
     cursor.execute("DELETE FROM rag_docs WHERE chat_id = ?", (chat_id,))
-    # Delete chat metadata
     cursor.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+    
     conn.commit()
     conn.close()
 
-    # Delete FAISS index file
     if rag_index_dir:
-        faiss_file = os.path.join(rag_index_dir, f"chat_{chat_id}.faiss")
-        if os.path.exists(faiss_file):
-            os.remove(faiss_file)
+        faiss_index_location = os.path.join(rag_index_dir, f"chat_{chat_id}.faiss")
+        
+        if os.path.exists(faiss_index_location):
+            try:
+                unload_faiss_index(chat_id) 
+                if os.path.isdir(faiss_index_location):
+                    shutil.rmtree(faiss_index_location)
+
+            except PermissionError as e:
+                # Log the error, the file remains locked
+                print(f"PermissionError: Could not delete RAG index {faiss_index_location}. File is still locked.")
+            except Exception as e:
+                # Log other deletion errors
+                print(f"Error deleting FAISS index: {e}")
