@@ -21,7 +21,6 @@ from modules.functions import (
     extract_text_from_file,
     rebuild_rag_index,
     get_relevant_rag,
-    # <<< CRITICAL FIX: Import the splitter class >>>
     RecursiveCharacterTextSplitter,
 )
 from modules.login import check_authentication, login_page, logout
@@ -164,7 +163,7 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = val
 
-    st.title("💬 AI Playground with RAG (Ollama + OpenAI)")
+    st.title("📖 My Learning AI")
 
     # -------- DB MANAGER --------
     db = DBManager(
@@ -182,15 +181,13 @@ def main():
 
     # ---------------- SIDEBAR ----------------
     with st.sidebar:
-        st.header("💾 Chat Sessions")
-
-        st.markdown(f"**👤 Logged in as: {username}**")
-        if st.button("🚪 Logout"):
+        st.markdown(f"**Logged in as: {username}**")
+        if st.button("Logout"):
             logout()
             st.rerun()
         st.markdown("---")
 
-        # Load existing chats
+        st.header("Chat Sessions")
         all_chats = db.load_all_chats()
 
         if st.button("🆕 New Chat"):
@@ -255,11 +252,11 @@ def main():
 
         # Storage backend switch
         previous_storage_backend = st.session_state.get(
-            "prev_storage_backend", "Local (FAISS + SQLite)"
+            "prev_storage_backend", "Local"
         )
         st.session_state.storage_backend = st.selectbox(
             "🗄️ Storage Backend",
-            ["Local (FAISS + SQLite)", "Qdrant (Remote)"],
+            ["Local", "Remote (Qdrant)"],
             index=0 if st.session_state.vector_db == "faiss" else 1,
         )
 
@@ -335,12 +332,9 @@ def main():
             return "OpenAI GPT-4"
         # Customize for your other Ollama models
         if model_id == "llama3:8b":
-            return "Ollama Llama 3"
+            return "Llama 3"
         if model_id == "qwen2.5vl:7b":
             return "Qwen 2.5 VL"
-        
-        # Default fallback for any unmapped model
-        return model_id.replace('-', ' ').title()
 
     # --- Model Retrieval Logic ---
     try:
