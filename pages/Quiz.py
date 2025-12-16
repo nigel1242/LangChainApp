@@ -135,8 +135,6 @@ def get_model_display_name(model_id: str) -> str:
     # Customize for your other Ollama models
     if model_id == "llama3:8b":
         return "Llama 3"
-    if model_id == "qwen2.5vl:7b":
-        return "Qwen 2.5 VL"
     
     # Default fallback for any unmapped model
     return model_id.replace('-', ' ').title()
@@ -147,7 +145,7 @@ try:
     raw_ollama_models = (m["model"] for m in ollama.list().get("models", []))
     
     # 2. FILTER: Exclude internal embedding models
-    ollama_models = tuple(m for m in raw_ollama_models if not m.startswith("nomic-embed-text"))
+    ollama_models = tuple(m for m in raw_ollama_models if not (m.startswith("nomic-embed-text") or m == "qwen2.5vl:7b"))
 except Exception:
     ollama_models = ()
     
