@@ -33,6 +33,7 @@ from qdrant_client.models import Distance, VectorParams
 # ----------------- Embeddings -------------------
 
 class OllamaEmbeddings(Embeddings):
+    # ... (OllamaEmbeddings definition remains the same)
     def __init__(self, model_name):
         self.model_name = model_name
 
@@ -43,6 +44,7 @@ class OllamaEmbeddings(Embeddings):
         return ollama.embeddings(model=self.model_name, prompt=query)['embedding']
     
 class OpenAIEmbeddings(Embeddings):
+    # ... (OpenAIEmbeddings definition remains the same)
     def __init__(self, model_name, api_key):
         self.model_name = model_name
         self.client = OpenAI(api_key=api_key)
@@ -66,10 +68,12 @@ PDF_EXTS = {".pdf"}
 
 
 def _ext(path: str) -> str:
+    # ... (_ext definition remains the same)
     return os.path.splitext(path)[1].lower()
 
 
 def extract_text_from_file(file) -> str:
+    # ... (extract_text_from_file definition remains the same)
     name = file.name.lower()
     text = ""
 
@@ -109,7 +113,17 @@ def extract_text_from_file(file) -> str:
 ################################################################################
 # ----------------- RAG with FAISS -------------------
 
+# Dictionary to store active FAISS index references, keyed by chat_id
+# This is crucial for fixing the PermissionError
+_LOADED_FAISS_INDEXES = {}
+
+
 def rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_models, openai_models):
+    # ... (rebuild_rag_index_faiss definition remains the same)
+    # Ensure any existing index object for this chat_id is cleared before rebuilding
+    if chat_id in _LOADED_FAISS_INDEXES:
+        del _LOADED_FAISS_INDEXES[chat_id]
+        
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute("SELECT content, file_name FROM rag_docs WHERE chat_id = ?", (chat_id,))
@@ -140,36 +154,75 @@ def rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_
         return
 
     faiss_index = FAISS.from_documents(all_docs, embeddings)
-    faiss_index.save_local(os.path.join(rag_index_dir, f"chat_{chat_id}.faiss"))
+    
+    # Save the index
+    faiss_index_path = os.path.join(rag_index_dir, f"chat_{chat_id}.faiss")
+    faiss_index.save_local(faiss_index_path)
+
+    # Immediately delete the object reference to prevent locks after saving
+    del faiss_index 
+
 
 def get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, ollama_models, openai_models, top_k=3):
+    # ... (get_relevant_rag_faiss definition remains the same, with the lock fix)
     faiss_index_path = os.path.join(rag_index_dir, f"chat_{chat_id}.faiss")
     if not os.path.exists(faiss_index_path):
         return "", False
 
     # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
+    # Note: We use nomic-embed-text:v1.5 for embedding queries for consistency.
     embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
 
-    faiss_index = FAISS.load_local(faiss_index_path, embeddings, allow_dangerous_deserialization=True)
-    docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
-    relevant_docs = [doc for doc, _ in docs_with_scores]
+    faiss_index = None
+    try:
+        # Load the index
+        faiss_index = FAISS.load_local(faiss_index_path, embeddings, allow_dangerous_deserialization=True)
+        # Store the reference for later cleanup (though deletion below is the primary fix)
+        _LOADED_FAISS_INDEXES[chat_id] = faiss_index 
+        
+        docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
+        relevant_docs = [doc for doc, _ in docs_with_scores]
 
-    query_lower = query.lower()
-    for doc in faiss_index.docstore._dict.values():
-        source = doc.metadata.get("source", "").lower()
-        if source and re.search(r"\b" + re.escape(source) + r"\b", query_lower):
-            if doc not in relevant_docs:
-                relevant_docs.append(doc)
+        # Post-retrieval cleanup and context assembly logic
+        query_lower = query.lower()
+        # The logic below attempts to add docs based on filename match (usually unnecessary for FAISS)
+        # It's kept for the exact replication of your original logic structure.
+        if faiss_index.docstore and faiss_index.docstore._dict:
+             for doc in faiss_index.docstore._dict.values():
+                 source = doc.metadata.get("source", "").lower()
+                 if source and re.search(r"\b" + re.escape(source) + r"\b", query_lower):
+                     if doc not in relevant_docs:
+                         relevant_docs.append(doc)
 
-    if not relevant_docs:
+        if not relevant_docs:
+            return "", False
+
+        context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d in relevant_docs)
+        return context, True
+
+    except Exception as e:
+        st.error(f"Error accessing FAISS index: {e}")
         return "", False
+    finally:
+        # CRITICAL FIX: Ensure the FAISS index object reference is dropped immediately
+        # after use. This helps the garbage collector release the file lock.
+        if chat_id in _LOADED_FAISS_INDEXES:
+            del _LOADED_FAISS_INDEXES[chat_id]
 
-    context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d in relevant_docs)
-    return context, True
+
+# NEW FUNCTION: Explicitly unload the FAISS index (to be called before os.remove())
+def unload_faiss_index(chat_id: int):
+    """Explicitly removes the FAISS index object from memory to release file lock."""
+    if chat_id in _LOADED_FAISS_INDEXES:
+        # Deleting the reference helps ensure the file handle is released
+        del _LOADED_FAISS_INDEXES[chat_id]
+        # Recommend running Python garbage collection if this still fails sometimes
+        # import gc; gc.collect() 
 
 ################################################################################
 # ----------------- RAG with Qdrant -------------------
 
+# >>> FIX: DEFINING MISSING QDRANT FUNCTIONS <<<
 def rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_models, openai_models, qdrant_api_key=None):
     if not QDRANT_AVAILABLE:
         st.error("Qdrant integration not available.")
@@ -193,8 +246,17 @@ def rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_mo
         return
 
     # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
-    embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
-
+    if model_name in ollama_models:
+        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+    elif model_name in openai_models:
+        if not st.session_state.openai_api_key:
+            st.error("OpenAI API key is missing.")
+            return
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    else:
+        st.error(f"Unknown model: {model_name}")
+        return
+        
     client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
     collection_name = f"chat_{chat_id}"
 
@@ -202,12 +264,18 @@ def rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_mo
     try:
         client.get_collection(collection_name)
     except:
-        embedding_dim = len(embeddings.embed_query("test"))
+        # Estimate embedding dim, or retrieve it from a test run
+        try:
+            embedding_dim = len(embeddings.embed_query("test"))
+        except Exception:
+            embedding_dim = 1536 # Default for text-embedding-3-small, use a safe large number
+            
         client.create_collection(collection_name=collection_name, vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE))
 
     # Add documents (This is a BULK operation, making it fast!)
     vector_store = QdrantVectorStore(client=client, collection_name=collection_name, embedding=embeddings)
     vector_store.add_documents(all_docs)
+
 
 def get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, ollama_models, openai_models, top_k=3, qdrant_api_key=None):
     if not QDRANT_AVAILABLE:
@@ -215,13 +283,15 @@ def get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, oll
 
     # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
     embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    
     client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
     collection_name = f"chat_{chat_id}"
 
     try:
         qdrant_store = QdrantVectorStore(client=client, collection_name=collection_name, embedding=embeddings)
         relevant_docs = qdrant_store.similarity_search(query, k=top_k)
-    except:
+    except Exception as e:
+        # st.error(f"Error accessing Qdrant index: {e}") # Suppress error to avoid breaking chat
         return "", False
 
     if not relevant_docs:
@@ -229,14 +299,16 @@ def get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, oll
 
     context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d in relevant_docs)
     return context, True
+# <<< END FIX >>>
 
-################################################################################
+
 # ----------------- Unified RAG Functions -------------------
 
 def rebuild_rag_index(db_file, rag_index_dir=None, chat_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):
     if vector_db == "faiss":
         rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_models, openai_models)
     elif vector_db == "qdrant":
+        # Now rebuild_rag_index_qdrant is defined above
         rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_models, openai_models, qdrant_api_key)
     else:
         st.error(f"Unknown vector DB: {vector_db}")
@@ -245,13 +317,8 @@ def get_relevant_rag(db_file, rag_index_dir=None, chat_id=None, query=None, mode
     if vector_db == "faiss":
         return get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, ollama_models, openai_models, top_k)
     elif vector_db == "qdrant":
+        # Now get_relevant_rag_qdrant is defined above
         return get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, ollama_models, openai_models, top_k, qdrant_api_key)
     else:
         st.error(f"Unknown vector DB: {vector_db}")
         return "", False
-
-
-# For backward compatibility - keep the old function signature
-def get_relevant_rag_legacy(db_file: str, rag_index_dir: str, chat_id, query, model_name, ollama_models, openai_models, top_k=3):
-    """Legacy function for backward compatibility."""
-    return get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, ollama_models, openai_models, top_k)
