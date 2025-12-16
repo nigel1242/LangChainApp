@@ -134,7 +134,7 @@ def get_model_display_name(model_id: str) -> str:
         return "OpenAI GPT-4"
     # Customize for your other Ollama models
     if model_id == "llama3:8b":
-        return "Ollama Llama 3"
+        return "Llama 3"
     if model_id == "qwen2.5vl:7b":
         return "Qwen 2.5 VL"
     
