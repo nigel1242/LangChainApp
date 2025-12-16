@@ -219,7 +219,7 @@ def login_page():
     init_db()
     cleanup_expired_sessions()
     
-    st.title("🔐 Login to AI Playground")
+    st.title("📖 My Learning AI")
 
     tab_login, tab_signup = st.tabs(["Login", "Sign Up"])
 
