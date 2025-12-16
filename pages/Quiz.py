@@ -124,33 +124,76 @@ with st.sidebar:
 st.title("📝 Quiz Builder (Subjects + Files + 10 MCQs)")
 
 # >>> START: UNIFIED MODEL SELECTOR (IN MAIN BODY, like app.py) <<<
-# --- Available Models ---
+
+# Mapping function to convert model IDs to friendly names
+def get_model_display_name(model_id: str) -> str:
+    """Provides a user-friendly name for a technical model ID."""
+    if model_id == "gpt-3.5-turbo":
+        return "OpenAI GPT-3.5 Turbo"
+    if model_id == "gpt-4":
+        return "OpenAI GPT-4"
+    # Customize for your other Ollama models
+    if model_id == "llama3:8b":
+        return "Ollama Llama 3"
+    if model_id == "qwen2.5vl:7b":
+        return "Qwen 2.5 VL"
+    
+    # Default fallback for any unmapped model
+    return model_id.replace('-', ' ').title()
+
+# --- Model Retrieval Logic ---
 try:
-    ollama_models = tuple(m['model'] for m in ollama.list().get("models", []))
+    # 1. Fetch all Ollama models
+    raw_ollama_models = (m["model"] for m in ollama.list().get("models", []))
+    
+    # 2. FILTER: Exclude internal embedding models
+    ollama_models = tuple(m for m in raw_ollama_models if not m.startswith("nomic-embed-text"))
 except Exception:
     ollama_models = ()
     
 openai_models = ("gpt-3.5-turbo","gpt-4") if st.session_state["openai_api_key"] else ()
+
+# Combine available technical model IDs
 available_models = ollama_models + openai_models
+# Create a list of user-friendly names for the selectbox
+display_models = [get_model_display_name(model) for model in available_models]
+
 
 if not available_models:
     st.warning("⚠️ No models available. Check Ollama server or OpenAI key")
 
-# Set default selected_model if none is chosen
-if available_models and st.session_state.selected_model is None:
-    st.session_state.selected_model = available_models[0]
-elif st.session_state.selected_model not in available_models:
-    st.session_state.selected_model = available_models[0] if available_models else None
+# --- Set Default State ---
+if available_models:
+    # If a model is already selected and is still available, use it
+    if st.session_state.selected_model in available_models:
+        default_index = available_models.index(st.session_state.selected_model)
+    # Otherwise, default to the first available model
+    else:
+        st.session_state.selected_model = available_models[0]
+        default_index = 0
+elif st.session_state.selected_model is None:
+    st.stop() # Stop if no models available
 
 # --- Model Selector ---
-selected_model = st.selectbox(
+selected_display_name = st.selectbox(
     "🧠 Choose model for Quiz Generation",
-    available_models,
-    index=available_models.index(st.session_state.selected_model) 
-    if st.session_state.selected_model in available_models else 0,
+    display_models, # Use friendly names for display
+    index=default_index,
     key="quiz_model_selector_main"
 )
-st.session_state.selected_model = selected_model # Update session state
+
+# CRITICAL: Map the selected friendly name back to the technical ID
+try:
+    # Get the index of the selected display name
+    selected_index = display_models.index(selected_display_name)
+    # Use that index to get the technical ID from the original list
+    selected_model_id = available_models[selected_index]
+except ValueError:
+    # Fallback if somehow the lists are out of sync (shouldn't happen)
+    selected_model_id = available_models[0]
+
+# Update session state with the technical ID
+st.session_state.selected_model = selected_model_id
 
 st.markdown("---")
 # >>> END: UNIFIED MODEL SELECTOR <<<

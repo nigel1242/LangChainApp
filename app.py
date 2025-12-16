@@ -326,8 +326,29 @@ def main():
                     st.success("✅ API key saved")
 
     # ---------------- MODELS AVAILABLE ----------------
+        # Mapping function to convert model IDs to friendly names
+    def get_model_display_name(model_id: str) -> str:
+        """Provides a user-friendly name for a technical model ID."""
+        if model_id == "gpt-3.5-turbo":
+            return "OpenAI GPT-3.5 Turbo"
+        if model_id == "gpt-4":
+            return "OpenAI GPT-4"
+        # Customize for your other Ollama models
+        if model_id == "llama3:8b":
+            return "Ollama Llama 3"
+        if model_id == "qwen2.5vl:7b":
+            return "Qwen 2.5 VL"
+        
+        # Default fallback for any unmapped model
+        return model_id.replace('-', ' ').title()
+
+    # --- Model Retrieval Logic ---
     try:
-        ollama_models = tuple(m["model"] for m in ollama.list().get("models", []))
+        # 1. Fetch all Ollama models
+        raw_ollama_models = (m["model"] for m in ollama.list().get("models", []))
+        
+        # 2. FILTER: Exclude models starting with 'nomic-embed-text'
+        ollama_models = tuple(m for m in raw_ollama_models if not m.startswith("nomic-embed-text"))
     except Exception:
         ollama_models = ()
 
@@ -338,22 +359,44 @@ def main():
         openai_models = tuple(openai_models)
 
     available_models = ollama_models + openai_models
+    # Create a list of user-friendly names for the selectbox
+    display_models = [get_model_display_name(model) for model in available_models]
 
     if not available_models:
         st.warning("⚠️ No models available. Check Ollama server or OpenAI key.")
         st.stop()
 
+    # --- Model Selection Logic ---
     disable_model_select = st.session_state.current_chat_id is not None
-    selected_model = st.selectbox(
+
+    # Determine the initial display value
+    if st.session_state.selected_model in available_models:
+        default_index = available_models.index(st.session_state.selected_model)
+        default_display_value = display_models[default_index]
+    else:
+        default_index = 0
+        default_display_value = display_models[0]
+
+    selected_display_name = st.selectbox(
         "🧠 Choose model",
-        available_models,
-        index=available_models.index(st.session_state.selected_model)
-        if st.session_state.selected_model in available_models
-        else 0,
+        display_models,  # Use friendly names for display
+        index=default_index,
         disabled=disable_model_select,
     )
+
+    # CRITICAL: Map the selected friendly name back to the technical ID
+    try:
+        # Get the index of the selected display name
+        selected_index = display_models.index(selected_display_name)
+        # Use that index to get the technical ID from the original list
+        selected_model_id = available_models[selected_index]
+    except ValueError:
+        # Should not happen if lists are kept in sync
+        selected_model_id = available_models[0] 
+
+
     if not disable_model_select:
-        st.session_state.selected_model = selected_model
+        st.session_state.selected_model = selected_model_id
 
     # ---------------- FILE UPLOADS (RAG) ----------------
     if st.session_state.selected_model:
