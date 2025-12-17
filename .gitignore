@@ -144,7 +144,7 @@ venv/
 subjects/
 
 # Rag indices
-rag_indices/*.faiss/
+rag_indices/
 
 # Session tokens
 *.session_token
