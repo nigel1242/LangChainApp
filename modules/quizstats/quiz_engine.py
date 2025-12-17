@@ -6,9 +6,7 @@ import random
 import re
 from typing import Any, Dict, List, Optional
 
-# --- NEW IMPORTS FOR OLLAMA ---
 import ollama
-# ------------------------------
 from openai import OpenAI
 
 # NEW: use the subject index so we know which slide/page a question came from
@@ -56,7 +54,7 @@ def _split_corpus_into_chunks(corpus_text: str, max_chars: int = 1800) -> List[s
             if re.search(pat, p, flags=re.IGNORECASE):
                 score += 3
 
-        if re.search(r"Figure|Chart|Diagram|Table", p, flags=re.IGNORECASE):
+        if re.search(r"Figure|Chart|Diagram|Table|Histogram|Scatter", p, flags=re.IGNORECASE):
             score += 4
 
         if length > 600:
@@ -75,22 +73,16 @@ def _split_corpus_into_chunks(corpus_text: str, max_chars: int = 1800) -> List[s
 # -------------------------------------------------------------
 #   INDEX-AWARE CHUNK BUILDER
 # -------------------------------------------------------------
-def _build_chunks_from_index(
-    subject: str,
-    max_chars: int = 1800,
-) -> List[Dict[str, Any]]:
+def _build_chunks_from_index(subject: str, max_chars: int = 1800) -> List[Dict[str, Any]]:
     """
     Build chunks directly from page_index.json so we know
     exactly which slide/page each chunk comes from.
 
-    Returns a list of:
-        {
-          "text": "...chunk text...",
-          "context": <original index entry dict>
-        }
+    Returns:
+        [{"text": "...", "context": <index entry dict>}]
 
-    We keep at most ONE chunk per index entry so that each
-    slide/page can yield at most one question.
+    We keep at most ONE chunk per index entry so each slide/page can yield
+    at most one question.
     """
     entries = get_subject_index_entries(subject)
     chunks: List[Dict[str, Any]] = []
@@ -101,7 +93,6 @@ def _build_chunks_from_index(
             continue
 
         if len(text) > max_chars:
-            # keep start and end – enough for GPT to see context
             text = text[: max_chars // 2] + "\n...\n" + text[-max_chars // 2 :]
 
         chunks.append({"text": text, "context": entry})
@@ -110,7 +101,7 @@ def _build_chunks_from_index(
 
 
 # -------------------------------------------------------------
-#   OLLAMA QUESTION GENERATOR (FIXED)
+#   OLLAMA QUESTION GENERATOR
 # -------------------------------------------------------------
 def _call_ollama_for_chunk(
     model_name: str,
@@ -125,15 +116,12 @@ def _call_ollama_for_chunk(
         "You are an expert exam question writer for a polytechnic module.\n"
         "Your job is to create challenging, contextualised multiple-choice questions.\n"
         "Use ONLY the provided notes; do not invent new data.\n"
-        "If the text references images/figures/tables, mark the question as "
-        "requiring an image by setting `needs_image: true`, otherwise false.\n"
-        "Across the questions you output from this chunk, avoid asking the "
-        "exact same thing twice.\n"
-        "Return the output as a clean, single JSON object, with no surrounding text or markdown."
+        "If the text references images/figures/tables, set `needs_image: true`.\n"
+        "Return a single JSON object ONLY (no markdown)."
     )
 
     user_prompt = f"""
-Generate up to {max_q} **challenging** MCQs from the notes below.
+Generate up to {max_q} challenging MCQs from the notes below.
 
 Notes (from subject: {subject}):
 <notes>
@@ -141,37 +129,35 @@ Notes (from subject: {subject}):
 </notes>
 
 RULES:
-- Questions must test **concepts**, not simple copying of numbers or labels.
-- When the notes obviously refer to a chart, table, figure, or workflow,
-  add:
-      "needs_image": true
-      "image_hint": a short phrase that helps locate this slide/page.
-- Otherwise:
-      "needs_image": false
+- Questions must test concepts, not just copy numbers/labels.
 - EXACT 4 options.
 - EXACT 1 correct answer.
 - Include a short explanation.
-- Include difficulty level: "easy", "medium", or "hard".
+- Include difficulty: "easy", "medium", or "hard".
+- Include a short topic label (2–6 words) describing the concept (e.g. "Z-score calculation", "Scatter plots and correlation").
+- If notes refer to chart/table/figure/workflow, set:
+    "needs_image": true
+    "image_hint": phrase to locate this slide/page
+  else needs_image false.
 
-Return **JSON ONLY** in this format:
-
+Return JSON ONLY in this format:
 {{
   "questions": [
     {{
-      "question": "text (you may include LaTeX like $\\int_0^1 x^2 \\, dx$)",
-      "choices": ["The correct choice text.", "The first incorrect choice text.", "The second incorrect choice text.", "The third incorrect choice text."], # <-- EXPLICIT CONTENT PROMPT
+      "question": "text (you may include LaTeX like $\\\\sigma = \\\\sqrt{{...}}$)",
+      "choices": ["A", "B", "C", "D"],
       "answer_index": 0,
       "explanation": "...",
       "needs_image": false,
       "image_hint": "",
-      "difficulty": "medium"
+      "difficulty": "medium",
+      "topic": "Short topic here"
     }}
   ]
 }}
-    """
+"""
 
     try:
-        # FIX: Ensure parentheses are balanced and arguments are correct.
         response = ollama.chat(
             model=model_name,
             messages=[
@@ -179,20 +165,21 @@ Return **JSON ONLY** in this format:
                 {"role": "user", "content": user_prompt},
             ],
             options={
-                "temperature": 0.5,      # Increased temp slightly
-                "num_predict": 4096,     # CRITICAL: Increased token limit
-            }, # <--- Closing the options dictionary and continuing arguments
-            format="json",               # <--- Correct keyword argument
+                "temperature": 0.5,
+                "num_predict": 4096,
+            },
+            format="json",
         )
-        raw = response['message']['content']
+        raw = response["message"]["content"]
     except Exception as e:
         print(f"[quiz_engine] Ollama error ({model_name}):", e)
         return []
-    
+
     return _parse_raw_quiz_json(raw, chunk_text, context_meta)
 
+
 # -------------------------------------------------------------
-#   GPT QUESTION GENERATOR (UPDATED SIGNATURE)
+#   OPENAI QUESTION GENERATOR
 # -------------------------------------------------------------
 def _call_openai_for_chunk(
     model_name: str,
@@ -202,8 +189,7 @@ def _call_openai_for_chunk(
     context_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Generates quiz questions using the OpenAI API."""
-    
-    # FIX: Get client internally to simplify the MAIN call signature
+
     client = _get_openai_client()
     if client is None:
         print("[quiz_engine] OpenAI API key missing inside chunk call. Skipping.")
@@ -213,14 +199,11 @@ def _call_openai_for_chunk(
         "You are an expert exam question writer for a polytechnic module.\n"
         "Your job is to create challenging, contextualised multiple-choice questions.\n"
         "Use ONLY the provided notes; do not invent new data.\n"
-        "If the text references images/figures/tables, mark the question as "
-        "requiring an image by setting `needs_image: true`, otherwise false.\n"
-        "Across the questions you output from this chunk, avoid asking the "
-        "exact same thing twice.\n"
+        "Return JSON only."
     )
 
     user_prompt = f"""
-Generate up to {max_q} **challenging** MCQs from the notes below.
+Generate up to {max_q} challenging MCQs from the notes below.
 
 Notes (from subject: {subject}):
 <notes>
@@ -228,38 +211,37 @@ Notes (from subject: {subject}):
 </notes>
 
 RULES:
-- Questions must test **concepts**, not simple copying of numbers or labels.
-- When the notes obviously refer to a chart, table, figure, or workflow,
-  add:
-      "needs_image": true
-      "image_hint": a short phrase that helps locate this slide/page.
-- Otherwise:
-      "needs_image": false
+- Questions must test concepts, not just copy numbers/labels.
 - EXACT 4 options.
 - EXACT 1 correct answer.
 - Include a short explanation.
-- Include difficulty level: "easy", "medium", or "hard".
+- Include difficulty: "easy", "medium", or "hard".
+- Include a short topic label (2–6 words) describing the concept (e.g. "Z-score calculation", "Scatter plots and correlation").
+- If notes refer to chart/table/figure/workflow, set:
+    "needs_image": true
+    "image_hint": phrase to locate this slide/page
+  else needs_image false.
 
-Return **JSON ONLY** in this format:
-
+Return JSON ONLY in this format:
 {{
   "questions": [
     {{
-      "question": "text (you may include LaTeX like $\\int_0^1 x^2 \\, dx$)",
+      "question": "text (you may include LaTeX like $\\\\sigma = \\\\sqrt{{...}}$)",
       "choices": ["A", "B", "C", "D"],
       "answer_index": 0,
       "explanation": "...",
       "needs_image": false,
       "image_hint": "",
-      "difficulty": "medium"
+      "difficulty": "medium",
+      "topic": "Short topic here"
     }}
   ]
 }}
-    """
+"""
 
     try:
         resp = client.chat.completions.create(
-            model=model_name, # USE THE PASSED MODEL NAME
+            model=model_name,
             temperature=0.35,
             messages=[
                 {"role": "system", "content": system_msg},
@@ -267,7 +249,7 @@ Return **JSON ONLY** in this format:
             ],
             # Note: OpenAI's client handles JSON response formatting separately from chat completions
         )
-        raw = resp.choices[0].message.content
+        raw = resp.choices[0].message.content or ""
     except Exception as e:
         print("[quiz_engine] OpenAI error:", e)
         return []
@@ -276,11 +258,13 @@ Return **JSON ONLY** in this format:
 
 
 # -------------------------------------------------------------
-#   JSON PARSING HELPER (EXTRACTED FROM GPT/OLLAMA CALLS)
+#   JSON PARSING + TOPIC GUARANTEE
 # -------------------------------------------------------------
-def _parse_raw_quiz_json(raw: str, chunk_text: str, context_meta: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Extract JSON from the response
-    # This regex is robust against code fences (```json ... ```)
+def _parse_raw_quiz_json(
+    raw: str,
+    chunk_text: str,
+    context_meta: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     match = re.search(r"\{[\s\S]*\}", raw or "")
     if not match:
         print("[quiz_engine] JSON block missing.")
@@ -292,13 +276,13 @@ def _parse_raw_quiz_json(raw: str, chunk_text: str, context_meta: Optional[Dict[
     except Exception:
         print("[quiz_engine] JSON parse error.")
         return []
-# --- REST OF PARSING LOGIC IS UNCHANGED ---
+
     qs = data.get("questions", []) or []
     out: List[Dict[str, Any]] = []
 
     for q in qs:
         question = str(q.get("question", "")).strip()
-        choices = [str(c).strip() for c in q.get("choices", [])]
+        choices = [str(c).strip() for c in (q.get("choices", []) or [])]
         if len(choices) != 4 or not question:
             continue
 
@@ -314,12 +298,34 @@ def _parse_raw_quiz_json(raw: str, chunk_text: str, context_meta: Optional[Dict[
         image_hint = str(q.get("image_hint", "")).strip()
         difficulty = str(q.get("difficulty", "medium")).strip() or "medium"
 
+        # ---- TOPIC (NO MORE 'No topic') ----
+        topic = str(q.get("topic", "")).strip()
+
+        # 1) If model didn't provide, use image_hint
+        if not topic:
+            topic = image_hint.strip()
+
+        # 2) If still empty, derive from context (page_index.json)
+        ctx = context_meta or {}
+        fname = (ctx.get("file") or "").strip()
+        ctype = (ctx.get("type") or "").strip()
+
+        if not topic and fname:
+            if ctype == "pptx_slide" and ctx.get("slide"):
+                topic = f"{fname} – Slide {ctx.get('slide')}"
+            elif ctype == "pdf_page" and ctx.get("page"):
+                topic = f"{fname} – Page {ctx.get('page')}"
+            else:
+                topic = fname
+
+        # 3) Absolute last fallback
+        if not topic:
+            topic = "General"
+
         # Minimal source snippet
         src_hint = " ".join(chunk_text.split()[:30])
 
-        # Attach context metadata (slide/page info) so the quiz UI
-        # can show the EXACT same slide later.
-        ctx = context_meta or {}
+        # Attach context metadata for “show context”
         context_info = {
             "type": ctx.get("type"),
             "file": ctx.get("file"),
@@ -338,6 +344,7 @@ def _parse_raw_quiz_json(raw: str, chunk_text: str, context_meta: Optional[Dict[
                 "image_hint": image_hint,
                 "source_hint": src_hint,
                 "difficulty": difficulty,
+                "topic": topic,  # ✅ ALWAYS NON-EMPTY
                 "context_meta": context_info,
             }
         )
@@ -346,17 +353,14 @@ def _parse_raw_quiz_json(raw: str, chunk_text: str, context_meta: Optional[Dict[
 
 
 # -------------------------------------------------------------
-#   FALLBACK (NO API KEY / NO LLM CONNECTION)
+#   FALLBACK (NO LLM)
 # -------------------------------------------------------------
-def _fallback_quiz(corpus_text: str, subject: str, n_questions: int):
-    """
-    Simple backup if no OPENAI_API_KEY is set or LLM connection fails.
-    """
+def _fallback_quiz(corpus_text: str, subject: str, n_questions: int) -> List[Dict[str, Any]]:
     sents = re.split(r"(?<=[.!?])\s+", corpus_text)
     sents = [s for s in sents if 60 < len(s) < 240]
 
     random.shuffle(sents)
-    out = []
+    out: List[Dict[str, Any]] = []
 
     for s in sents[:n_questions]:
         words = s.split()
@@ -367,19 +371,21 @@ def _fallback_quiz(corpus_text: str, subject: str, n_questions: int):
         words[idx] = "_____"
         stem = " ".join(words)
 
-        wrongs = random.sample(words, min(3, len(words) - 1))
+        wrongs = random.sample([w for w in words if w != "_____"], min(3, max(3, len(words) - 1)))
         choices = [ans] + wrongs
         random.shuffle(choices)
+
         out.append(
             {
                 "question": stem,
-                "choices": choices,
-                "answer_idx": choices.index(ans),
+                "choices": choices[:4] if len(choices) >= 4 else (choices + ["..."])[:4],
+                "answer_idx": choices.index(ans) if ans in choices else 0,
                 "explanation": "Look at the original sentence.",
                 "needs_image": False,
                 "image_hint": "",
                 "source_hint": s[:40],
                 "difficulty": "easy",
+                "topic": "General",  # ✅ fallback still has topic
                 "context_meta": {},
             }
         )
@@ -388,20 +394,19 @@ def _fallback_quiz(corpus_text: str, subject: str, n_questions: int):
 
 
 # -------------------------------------------------------------
-#   MAIN PUBLIC API (FINALIZED)
+#   MAIN PUBLIC API
 # -------------------------------------------------------------
 def build_quiz_from_corpus(
     corpus_text: str,
     subject: str,
-    model_name: str, # model_name is required
+    model_name: str,
     n_questions: int = 10,
 ) -> List[Dict[str, Any]]:
 
     corpus_text = (corpus_text or "").strip()
     if not corpus_text:
         return []
-    
-    # Determine which call function to use
+
     is_openai_model = "gpt" in model_name.lower()
     
     # The call function now only takes 5 arguments (model_name, chunk_text, etc.)
@@ -416,7 +421,7 @@ def build_quiz_from_corpus(
     if indexed_chunks:
         random.shuffle(indexed_chunks)
 
-        # ONE question per index entry => no slide/page repeats
+        # ONE question per index entry => reduces repeats
         for item in indexed_chunks:
             remain = n_questions - len(quiz)
             if remain <= 0:
@@ -427,10 +432,10 @@ def build_quiz_from_corpus(
 
             # The call_fn signature is now consistent: (model_name, chunk_text, subject, max_q, context_meta)
             qs = call_fn(
-                model_name, 
+                model_name,
                 chunk_text,
                 subject,
-                max_q=1,      # at most 1 question from this slide/page
+                max_q=1,
                 context_meta=ctx,
             )
 
@@ -438,9 +443,9 @@ def build_quiz_from_corpus(
                 # prevent identical question text duplicates
                 if all(q["question"] != e["question"] for e in quiz):
                     quiz.append(q)
-                    break  # move to next slide/page
+                    break
 
-    # If index missing or not enough questions, fall back to old behaviour
+    # Top-up if needed
     if len(quiz) < n_questions:
         print("[quiz_engine] Index produced fewer questions; topping up.")
         plain_chunks = _split_corpus_into_chunks(corpus_text)
@@ -453,12 +458,13 @@ def build_quiz_from_corpus(
 
             # The call_fn signature is now consistent: (model_name, chunk, subject, max_q, context_meta)
             qs = call_fn(
-                model_name, 
-                chunk, 
-                subject, 
-                max_q=min(3, remain), 
-                context_meta=None
+                model_name,
+                chunk,
+                subject,
+                max_q=min(3, remain),
+                context_meta=None,
             )
+
             for q in qs:
                 if all(q["question"] != e["question"] for e in quiz):
                     quiz.append(q)
