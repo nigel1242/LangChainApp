@@ -1,27 +1,14 @@
-# pages/quiz.py (Revised: Model Selector in Main Body)
-
 import os
 import time
 from pathlib import Path
-
 import streamlit as st
 from dotenv import load_dotenv
 import ollama
 from openai import OpenAI
-import openai
 
 # --- Local Module Imports ---
+from modules.db_manager import DBManager
 from modules.login import check_authentication, login_page, logout
-
-from modules.quizstats.subject_store import (
-    init_subject_db,
-    list_subjects,
-    create_subject_if_missing,
-    get_subject_meta,
-    save_subject_meta,
-    ensure_subject_folders,
-    delete_subject,
-)
 from modules.quizstats.file_utils import (
     save_uploaded_files,
     extract_corpus_for_subject,
@@ -35,39 +22,31 @@ from modules.quizstats.progress_store import (
     record_attempt,
     clear_subject_stats,
 )
+from modules.quizstats.subject_store import ensure_subject_folders # Keep for folder creation
 
-# --- GLOBAL CONSTANTS (Copied from app.py for RAG functions) ---
+# --- CONFIG ---
 CHAT_DB_FILE = "chat_playground.db"
 RAG_INDEX_DIR = "rag_indices"
-os.makedirs(RAG_INDEX_DIR, exist_ok=True)
 
-
-# ---------- PAGE CONFIG ----------
 st.set_page_config(page_title="Quiz Builder", page_icon="📝", layout="wide")
 load_dotenv()
 
-# ---------- AUTHENTICATION GATE (Unified with App.py) ----------
+# ---------- AUTHENTICATION ----------
 is_authenticated, username = check_authentication()
-
 if not is_authenticated:
     login_page()
     st.stop()
-    
-# ---------- SESSION ----------
-# Ensure keys exist, using the structure from app.py
-defaults = {
-    "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
-    "selected_model": None, # Top-level key for LLM
-}
-for key, val in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
 
-# Update the quiz_state initialization
+# ---------- DB MANAGER & STATE ----------
+db = DBManager(backend="sqlite", db_file=CHAT_DB_FILE)
+init_stats_db()
+
+# Sync with app.py defaults
+if "current_subject" not in st.session_state:
+    st.session_state.current_subject = "General"
+
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
-        "selected_subject": None,
-        "new_subject_name": "",
         "uploads_buffer": [],
         "quiz": [],
         "current_idx": 0,
@@ -80,271 +59,110 @@ if "quiz_state" not in st.session_state:
 
 S = st.session_state.quiz_state
 
-# make sure stats DB exists
-init_stats_db()
-
-
-# ---------- SIDEBAR (Simplified to only contain Auth/Config) ----------
+# ---------- SIDEBAR ----------
 with st.sidebar:
     st.markdown(f"**Logged in as: {username}**")
     if st.button("Logout"):
         logout()
         st.rerun()
     st.markdown("---")
-
-    # 1. --- API Key Expander (Copied from app.py) ---
-    st.header("🔑 API Keys")
-    with st.expander("Manage Keys"):
-        # The key check uses the top-level session state key
-        if st.session_state.openai_api_key:
-            st.success("OpenAI API Key loaded from .env")
-            override_key = st.text_input(
-                "Override OpenAI API Key (optional)",
-                type="password",
-                placeholder="Leave empty to use .env key",
-                key="quiz_openai_override"
-            )
-            if override_key:
-                st.session_state.openai_api_key = override_key
-                st.success("Using custom API key")
-        else:
-            api_key_input = st.text_input(
-                "Enter your OpenAI API Key",
-                type="password",
-                key="quiz_openai_input"
-            )
-            if api_key_input:
-                st.session_state.openai_api_key = api_key_input
-                st.success("API key saved")
-                st.rerun()
-                
-# ---------- SIDEBAR END ----------
-
-# ---------- HEADER ----------
-st.title("📝 Quiz Builder (Subjects + Files + 10 MCQs)")
-
-# >>> START: UNIFIED MODEL SELECTOR (IN MAIN BODY, like app.py) <<<
-
-# Mapping function to convert model IDs to friendly names
-def get_model_display_name(model_id: str) -> str:
-    """Provides a user-friendly name for a technical model ID."""
-    if model_id == "gpt-3.5-turbo":
-        return "OpenAI GPT-3.5 Turbo"
-    if model_id == "gpt-4":
-        return "OpenAI GPT-4"
-    # Customize for your other Ollama models
-    if model_id == "llama3:8b":
-        return "Llama 3"
     
-    # Default fallback for any unmapped model
-    return model_id.replace('-', ' ').title()
-
-# --- Model Retrieval Logic ---
-try:
-    # 1. Fetch all Ollama models
-    raw_ollama_models = (m["model"] for m in ollama.list().get("models", []))
+    # Subject Selector moved to Sidebar for consistency with app.py
+    st.header("📚 Subject Library")
+    subjects = db.load_all_subjects()
+    if not subjects:
+        db.add_subject("General")
+        subjects = ["General"]
     
-    # 2. FILTER: Exclude internal embedding models
-    ollama_models = tuple(m for m in raw_ollama_models if not (m.startswith("nomic-embed-text") or m == "qwen2.5vl:7b"))
-except Exception:
-    ollama_models = ()
-    
-openai_models = ("gpt-3.5-turbo","gpt-4") if st.session_state["openai_api_key"] else ()
-
-# Combine available technical model IDs
-available_models = ollama_models + openai_models
-# Create a list of user-friendly names for the selectbox
-display_models = [get_model_display_name(model) for model in available_models]
-
-
-if not available_models:
-    st.warning("⚠️ No models available. Check Ollama server or OpenAI key")
-
-# --- Set Default State ---
-if available_models:
-    # If a model is already selected and is still available, use it
-    if st.session_state.selected_model in available_models:
-        default_index = available_models.index(st.session_state.selected_model)
-    # Otherwise, default to the first available model
-    else:
-        st.session_state.selected_model = available_models[0]
-        default_index = 0
-elif st.session_state.selected_model is None:
-    st.stop() # Stop if no models available
-
-# --- Model Selector ---
-selected_display_name = st.selectbox(
-    "🧠 Choose model for Quiz Generation",
-    display_models, # Use friendly names for display
-    index=default_index,
-    key="quiz_model_selector_main"
-)
-
-# CRITICAL: Map the selected friendly name back to the technical ID
-try:
-    # Get the index of the selected display name
-    selected_index = display_models.index(selected_display_name)
-    # Use that index to get the technical ID from the original list
-    selected_model_id = available_models[selected_index]
-except ValueError:
-    # Fallback if somehow the lists are out of sync (shouldn't happen)
-    selected_model_id = available_models[0]
-
-# Update session state with the technical ID
-st.session_state.selected_model = selected_model_id
-
-st.markdown("---")
-# >>> END: UNIFIED MODEL SELECTOR <<<
-
-
-# ---------- SUBJECTS: CREATE / SELECT ----------
-init_subject_db()
-
-left, right = st.columns([1, 1])
-
-with left:
-    st.subheader("📚 Subjects")
-
-    subjects = list_subjects()
-    subject_names = [s["name"] for s in subjects]
-
-    PLACEHOLDER = "— select —"
-    existing_names = [PLACEHOLDER] + subject_names
-
-    if S["selected_subject"] in subject_names:
-        default_label = S["selected_subject"]
-    else:
-        default_label = PLACEHOLDER
-    default_index = existing_names.index(default_label)
-
-    selected_label = st.selectbox(
-        "Choose existing subject",
-        existing_names,
-        index=default_index,
-        key="subject_selector_main",
+    # Dropdown to select the subject
+    selected_sub = st.selectbox(
+        "Select Subject", 
+        subjects, 
+        index=subjects.index(st.session_state.current_subject) if st.session_state.current_subject in subjects else 0
     )
-
-    if selected_label == PLACEHOLDER:
-        S["selected_subject"] = None
-    else:
-        S["selected_subject"] = selected_label
-
-    # 🔻 DELETE SUBJECT BUTTON (only when one is selected)
-    if S["selected_subject"]:
-        st.markdown("### Delete Subject")
-        if st.button(
-            f"🗑️ Delete subject '{S['selected_subject']}'",
-            type="secondary",
-            key="delete_subject_btn",
-        ):
-            # 1) Clear stats for that subject
-            try:
-                clear_subject_stats(S["selected_subject"])
-            except Exception as e:
-                st.warning(f"Could not clear stats for subject: {e}")
-
-            # 2) Delete subject from DB + disk
-            ok, msg = delete_subject(S["selected_subject"]) 
-            if ok:
-                st.success(msg + " All quiz stats for this subject were cleared.")
-                # 3) Reset local state
-                S["selected_subject"] = None
-                S["quiz"] = []
-                S["current_idx"] = 0
-                S["score"] = 0
-                S["answered"] = {}
-                S["submitted"] = {}
-                S["corpus"] = ""
-                S["show_image"] = {}
-                st.rerun()
-            else:
-                st.error(msg)
-
-with right:
-    st.subheader("➕ New Subject")
-
-    S["new_subject_name"] = st.text_input(
-        "Create a new subject:",
-        value=S["new_subject_name"],
-        key="new_subject_name",
-    )
-
-    if st.button("Create Subject", key="create_subject_btn"):
-        ok, msg = create_subject_if_missing(S["new_subject_name"])
-        if ok:
-            st.success(f"Created subject '{S['new_subject_name']}'")
-            S["selected_subject"] = S["new_subject_name"]
-            S["new_subject_name"] = ""
-        else:
-            st.error(msg)
-
-if not S["selected_subject"]:
-    st.info("Select a subject on the left or create a new one.")
-    st.stop()
-
-# Ensure folder layout
-subject_root = ensure_subject_folders(S["selected_subject"])
-
-# ---------- FILE UPLOAD ----------
-st.markdown("### 📤 Upload Files (TXT, DOCX, PPTX, CSV, PDF)")
-uploaded = st.file_uploader(
-    "Drag and drop multiple files",
-    type=["txt", "md", "pdf", "PDF", "docx", "pptx", "csv"],
-    accept_multiple_files=True,
-    key="quiz_uploader",
-)
-if uploaded:
-    S["uploads_buffer"] = uploaded
-
-if st.button("📦 Process Uploaded Files"):
-    if not S["uploads_buffer"]:
-        st.warning("No files selected.")
-    elif not st.session_state.selected_model:
-        st.error("Please select a model above before processing.")
-    else:
-        with st.spinner("Processing files and rebuilding RAG index..."):
-            # Step 1: Save files and extract corpus
-            saved = save_uploaded_files(S["selected_subject"], S["uploads_buffer"])
-            S["uploads_buffer"] = []
-            corpus = extract_corpus_for_subject(S["selected_subject"])
-            
-            # Step 2: Save metadata
-            meta = get_subject_meta(S["selected_subject"]) or {}
-            meta["last_indexed_ms"] = int(time.time() * 1000)
-            meta["char_count"] = len(corpus)
-            save_subject_meta(S["selected_subject"], meta)
-            
-            st.success(f"Processed {len(saved)} file(s). Indexed {len(corpus):,} characters.")
-
+    
+    if selected_sub != st.session_state.current_subject:
+        st.session_state.current_subject = selected_sub
+        # Reset quiz when switching subjects
+        S.update({"quiz": [], "current_idx": 0, "score": 0, "answered": {}, "submitted": {}})
         st.rerun()
 
-# ---------- BUILD / START QUIZ ----------
-st.markdown("### 🧠 Generate Quiz (10 MCQs)")
-if st.button("🎲 Generate 10 Questions"):
-    corpus = extract_corpus_for_subject(S["selected_subject"])
-    if not corpus.strip():
-        st.warning("No text in this subject yet. Please upload/process files first.")
-    else:
-        # Check central model state
-        if not st.session_state.selected_model:
-            st.error("Please select a model above first.")
-            st.stop()
-            
-        quiz = build_quiz_from_corpus(
-            corpus_text=corpus,
-            subject=S["selected_subject"],
-            n_questions=10,
-            model_name=st.session_state.selected_model, # Use central state model
-        )
-        S["quiz"] = quiz
-        S["current_idx"] = 0
-        S["score"] = 0
-        S["answered"] = {}
-        S["submitted"] = {}
-        S["corpus"] = corpus
-        S["show_image"] = {}
-        st.success("Quiz ready! Scroll down to answer.")
+# ---------- MAIN BODY ----------
+st.title(f"📝 Quiz Builder: {st.session_state.current_subject}")
 
+# Model Selector Mapping (Consolidated)
+MODEL_MAP = {
+    "llama3:8b": "Llama 3 (Base Model)",
+    "qwen2.5vl:7b": "Qwen 2.5 VL (Vision Model)",
+    "gpt-4o": "OpenAI GPT-4o",
+}
+
+# Fetch installed Ollama models
+try:
+    ollama_list = [m["model"] for m in ollama.list().get("models", [])]
+    available_ollama = [m for m in ollama_list if not m.startswith("nomic")]
+except:
+    available_ollama = []
+
+openai_models = ("gpt-4o",) if st.session_state.get("openai_api_key") else ()
+available_models = tuple(available_ollama) + openai_models
+
+if not available_models:
+    st.error("⚠️ No models available. Check Ollama or API Keys.")
+    st.stop()
+
+# Determine default model
+m_idx = 0
+if st.session_state.get("selected_model") in available_models:
+    m_idx = available_models.index(st.session_state.selected_model)
+
+selected_friendly = st.selectbox(
+    "🧠 Choose model for Quiz Generation",
+    [MODEL_MAP.get(m, m) for m in available_models],
+    index=m_idx
+)
+# Update technical ID back to session state
+st.session_state.selected_model = available_technical_id = available_models[[MODEL_MAP.get(m, m) for m in available_models].index(selected_friendly)]
+
+st.markdown("---")
+
+# Ensure folder layout for the selected subject
+subject_root = ensure_subject_folders(st.session_state.current_subject)
+
+# ---------- FILE UPLOAD & PROCESSING ----------
+with st.expander(f"📤 Knowledge Base: {st.session_state.current_subject}"):
+    uploaded = st.file_uploader("Add files to this subject", type=["txt", "md", "pdf", "docx", "pptx", "csv"], accept_multiple_files=True)
+    if uploaded:
+        S["uploads_buffer"] = uploaded
+
+    if st.button("📂 Process & Index Files"):
+        if not S["uploads_buffer"]:
+            st.warning("No files selected.")
+        else:
+            with st.spinner("Processing..."):
+                save_uploaded_files(st.session_state.current_subject, S["uploads_buffer"])
+                S["uploads_buffer"] = []
+                st.success("Files saved to Subject Library!")
+                st.rerun()
+
+# ---------- GENERATE QUIZ ----------
+if st.button("🎲 Generate 10 Questions from Subject"):
+    corpus = extract_corpus_for_subject(st.session_state.current_subject)
+    if not corpus.strip():
+        st.warning("Knowledge base is empty. Upload files first.")
+    else:
+        with st.spinner("Generating MCQs..."):
+            quiz = build_quiz_from_corpus(
+                corpus_text=corpus,
+                subject=st.session_state.current_subject,
+                n_questions=10,
+                model_name=st.session_state.selected_model,
+            )
+            S.update({
+                "quiz": quiz, "current_idx": 0, "score": 0,
+                "answered": {}, "submitted": {}, "corpus": corpus
+            })
+            st.success("Quiz Generated!")
 # ---------- QUIZ PLAYER ----------
 if S["quiz"]:
     st.divider()

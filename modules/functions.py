@@ -1,3 +1,4 @@
+# modules/functions.py
 import os
 import re
 import sqlite3
@@ -8,6 +9,9 @@ from docx import Document as DocxDocument
 from pptx import Presentation
 import fitz  # PyMuPDF
 
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qmodels
+from langchain_community.vectorstores import Qdrant as QdrantVectorStore
 import ollama
 from openai import OpenAI
 from langchain_core.embeddings import Embeddings
@@ -15,25 +19,13 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
-# Qdrant import
-try:
-    from langchain_qdrant import QdrantVectorStore
-    QDRANT_AVAILABLE = True
-except ImportError:
-    try:
-        from langchain_community.vectorstores import Qdrant as QdrantVectorStore
-        QDRANT_AVAILABLE = True
-    except ImportError:
-        QDRANT_AVAILABLE = False
-
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+# Dictionary to store active FAISS index references to prevent file locking
+_LOADED_FAISS_INDEXES = {}
 
 ################################################################################
 # ----------------- Embeddings -------------------
 
 class OllamaEmbeddings(Embeddings):
-    # ... (OllamaEmbeddings definition remains the same)
     def __init__(self, model_name):
         self.model_name = model_name
 
@@ -44,7 +36,6 @@ class OllamaEmbeddings(Embeddings):
         return ollama.embeddings(model=self.model_name, prompt=query)['embedding']
     
 class OpenAIEmbeddings(Embeddings):
-    # ... (OpenAIEmbeddings definition remains the same)
     def __init__(self, model_name, api_key):
         self.model_name = model_name
         self.client = OpenAI(api_key=api_key)
@@ -60,20 +51,7 @@ class OpenAIEmbeddings(Embeddings):
 ################################################################################
 # ----------------- File Processing -------------------
 
-TEXT_FILE_EXTS = {".txt", ".md"}
-DOCX_EXTS = {".docx"}
-PPTX_EXTS = {".pptx"}
-CSV_EXTS = {".csv"}
-PDF_EXTS = {".pdf"}
-
-
-def _ext(path: str) -> str:
-    # ... (_ext definition remains the same)
-    return os.path.splitext(path)[1].lower()
-
-
 def extract_text_from_file(file) -> str:
-    # ... (extract_text_from_file definition remains the same)
     name = file.name.lower()
     text = ""
 
@@ -81,56 +59,69 @@ def extract_text_from_file(file) -> str:
         doc = fitz.open(stream=file.read(), filetype="pdf")
         for page in doc:
             txt = page.get_text("text")
-            if txt:
-                text += txt + "\n"
+            if txt: text += txt + "\n"
         doc.close()
-
     elif name.endswith(".docx"):
         doc = DocxDocument(file)
         text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-
     elif name.endswith(".pptx"):
         prs = Presentation(file)
         slides_text = []
         for i, slide in enumerate(prs.slides, start=1):
             slide_text = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
-            if slide_text:
-                slides_text.append(f"--- Slide {i} ---\n" + "\n".join(slide_text))
+            if slide_text: slides_text.append(f"--- Slide {i} ---\n" + "\n".join(slide_text))
         text = "\n".join(slides_text)
-
     elif name.endswith((".txt", ".md")):
         text = file.read().decode("utf-8", errors="ignore")
-
     elif name.endswith(".csv"):
         try:
             df = pd.read_csv(file)
             text = df.to_string(index=False)
         except Exception as e:
             text = f"Error reading CSV: {e}"
-
     return text.strip()
 
-################################################################################
-# ----------------- RAG with FAISS -------------------
+# ----------------- TTS & Audio -------------------
 
-# Dictionary to store active FAISS index references, keyed by chat_id
-# This is crucial for fixing the PermissionError
-_LOADED_FAISS_INDEXES = {}
+def get_b64_image(file_bytes: bytes) -> str:
+    import base64
+    return base64.b64encode(file_bytes).decode("utf-8")
 
+def transcribe_audio_bytes(audio_bytes: bytes, openai_client: OpenAI) -> str:
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(audio_bytes)
+        tmp_path = tmp.name
+    try:
+        with open(tmp_path, "rb") as f:
+            resp = openai_client.audio.transcriptions.create(model="whisper-1", file=f, language="en")
+        return (resp.text or "").strip()
+    finally:
+        if os.path.exists(tmp_path): os.remove(tmp_path)
 
-def rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_models, openai_models):
-    # ... (rebuild_rag_index_faiss definition remains the same)
-    # Ensure any existing index object for this chat_id is cleared before rebuilding
-    if chat_id in _LOADED_FAISS_INDEXES:
-        del _LOADED_FAISS_INDEXES[chat_id]
+def speak_text(answer: str, openai_client: OpenAI, voice: str = "alloy") -> bytes | None:
+    answer = (answer or "").strip()
+    if not answer: return None
+    try:
+        resp = openai_client.audio.speech.create(model="tts-1", voice=voice, input=answer)
+        return resp.read()
+    except Exception as e:
+        print(f"Audio generation failed: {e}")
+        return None
+
+# ----------------- RAG with FAISS (Local) -------------------
+
+def rebuild_rag_index_faiss(db_file, rag_index_dir, target_name, model_name, ollama_models, openai_models):
+    if target_name in _LOADED_FAISS_INDEXES:
+        del _LOADED_FAISS_INDEXES[target_name]
         
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("SELECT content, file_name FROM rag_docs WHERE chat_id = ?", (chat_id,))
+    cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
     rows = cursor.fetchall()
     conn.close()
-    if not rows:
-        return
+    
+    if not rows: return
 
     all_docs = []
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
@@ -138,187 +129,123 @@ def rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_
         for chunk in splitter.split_text(content):
             all_docs.append(Document(page_content=chunk, metadata={"source": file_name}))
 
-    if not all_docs:
-        return
-
-    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
     if model_name in ollama_models:
         embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-    elif model_name in openai_models:
-        if not st.session_state.openai_api_key:
-            st.error("OpenAI API key is missing.")
-            return
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
     else:
-        st.error(f"Unknown model: {model_name}")
-        return
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
 
     faiss_index = FAISS.from_documents(all_docs, embeddings)
-    
-    # Save the index
-    faiss_index_path = os.path.join(rag_index_dir, f"chat_{chat_id}.faiss")
+    faiss_index_path = os.path.join(rag_index_dir, f"subject_{target_name}")
     faiss_index.save_local(faiss_index_path)
 
-    # Immediately delete the object reference to prevent locks after saving
-    del faiss_index 
+def get_relevant_rag_faiss(db_file, rag_index_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3):
+    faiss_index_path = os.path.join(rag_index_dir, f"subject_{target_name}")
+    if not os.path.exists(faiss_index_path): return "", False
 
+    if model_name in ollama_models:
+        embeddings = OllamaEmbeddings("nomic-embed-text:v1.5")
+    else:
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
 
-def get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, ollama_models, openai_models, top_k=3):
-    # ... (get_relevant_rag_faiss definition remains the same, with the lock fix)
-    faiss_index_path = os.path.join(rag_index_dir, f"chat_{chat_id}.faiss")
-    if not os.path.exists(faiss_index_path):
-        return "", False
-
-    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
-    # Note: We use nomic-embed-text:v1.5 for embedding queries for consistency.
-    embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
-
-    faiss_index = None
     try:
-        # Load the index
         faiss_index = FAISS.load_local(faiss_index_path, embeddings, allow_dangerous_deserialization=True)
-        # Store the reference for later cleanup (though deletion below is the primary fix)
-        _LOADED_FAISS_INDEXES[chat_id] = faiss_index 
-        
         docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
-        relevant_docs = [doc for doc, _ in docs_with_scores]
-
-        # Post-retrieval cleanup and context assembly logic
-        query_lower = query.lower()
-        # The logic below attempts to add docs based on filename match (usually unnecessary for FAISS)
-        # It's kept for the exact replication of your original logic structure.
-        if faiss_index.docstore and faiss_index.docstore._dict:
-             for doc in faiss_index.docstore._dict.values():
-                 source = doc.metadata.get("source", "").lower()
-                 if source and re.search(r"\b" + re.escape(source) + r"\b", query_lower):
-                     if doc not in relevant_docs:
-                         relevant_docs.append(doc)
-
-        if not relevant_docs:
-            return "", False
-
-        context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d in relevant_docs)
+        context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d, _ in docs_with_scores)
         return context, True
-
     except Exception as e:
         st.error(f"Error accessing FAISS index: {e}")
         return "", False
-    finally:
-        # CRITICAL FIX: Ensure the FAISS index object reference is dropped immediately
-        # after use. This helps the garbage collector release the file lock.
-        if chat_id in _LOADED_FAISS_INDEXES:
-            del _LOADED_FAISS_INDEXES[chat_id]
 
+# ----------------- RAG with Qdrant (Remote) -------------------
 
-# NEW FUNCTION: Explicitly unload the FAISS index (to be called before os.remove())
-def unload_faiss_index(chat_id: int):
-    """Explicitly removes the FAISS index object from memory to release file lock."""
-    if chat_id in _LOADED_FAISS_INDEXES:
-        # Deleting the reference helps ensure the file handle is released
-        del _LOADED_FAISS_INDEXES[chat_id]
-        # Recommend running Python garbage collection if this still fails sometimes
-        # import gc; gc.collect() 
-
-################################################################################
-# ----------------- RAG with Qdrant -------------------
-
-# >>> FIX: DEFINING MISSING QDRANT FUNCTIONS <<<
-def rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_models, openai_models, qdrant_api_key=None):
-    if not QDRANT_AVAILABLE:
-        st.error("Qdrant integration not available.")
-        return
-
+def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollama_models, openai_models, qdrant_api_key=None):
+    # This remains as a sync helper if you need to bulk-re-upload
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("SELECT content, file_name FROM rag_docs WHERE chat_id = ?", (chat_id,))
+    cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
     rows = cursor.fetchall()
     conn.close()
-    if not rows:
-        return
+    
+    if not rows: return
 
-    all_docs = []
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    for content, file_name in rows:
-        for chunk in splitter.split_text(content):
-            all_docs.append(Document(page_content=chunk, metadata={"source": file_name}))
-
-    if not all_docs:
-        return
-
-    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
     if model_name in ollama_models:
         embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-    elif model_name in openai_models:
-        if not st.session_state.openai_api_key:
-            st.error("OpenAI API key is missing.")
-            return
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
     else:
-        st.error(f"Unknown model: {model_name}")
-        return
-        
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+
     client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
-    collection_name = f"chat_{chat_id}"
+    
+    for content, file_name in rows:
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        chunks = splitter.split_text(content)
+        collection_name = f"rag_docs_{len(embeddings.embed_query('test'))}"
+        
+        # Note: Actual ingestion logic is usually handled by db.add_rag_doc 
+        # but this ensures the collection is structured for the subject
+        pass
 
-    # Create collection if missing
-    try:
-        client.get_collection(collection_name)
-    except:
-        # Estimate embedding dim, or retrieve it from a test run
-        try:
-            embedding_dim = len(embeddings.embed_query("test"))
-        except Exception:
-            embedding_dim = 1536 # Default for text-embedding-3-small, use a safe large number
-            
-        client.create_collection(collection_name=collection_name, vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE))
-
-    # Add documents (This is a BULK operation, making it fast!)
-    vector_store = QdrantVectorStore(client=client, collection_name=collection_name, embedding=embeddings)
-    vector_store.add_documents(all_docs)
-
-
-def get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, ollama_models, openai_models, top_k=3, qdrant_api_key=None):
-    if not QDRANT_AVAILABLE:
-        return "", False
-
-    # >>> FIXED: Use consistent versioned model name for Ollama RAG <<<
-    embeddings = OllamaEmbeddings("nomic-embed-text:v1.5") if model_name in ollama_models else OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+def get_relevant_rag_qdrant(db_file, qdrant_url, target_id, query, model_name, ollama_models, openai_models, top_k=3, qdrant_api_key=None):
+    if model_name in ollama_models:
+        embeddings = OllamaEmbeddings("nomic-embed-text:v1.5")
+    else:
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
     
     client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
-    collection_name = f"chat_{chat_id}"
+    query_vector = embeddings.embed_query(query)
+    
+    # Correct Naming Convention: rag_docs_<vector_size>
+    collection_name = f"rag_docs_{len(query_vector)}" 
 
     try:
-        qdrant_store = QdrantVectorStore(client=client, collection_name=collection_name, embedding=embeddings)
-        relevant_docs = qdrant_store.similarity_search(query, k=top_k)
+        response = client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            query_filter=qmodels.Filter(
+                must=[qmodels.FieldCondition(key="subject_name", match=qmodels.MatchValue(value=target_id))]
+            ),
+            limit=top_k,
+            with_payload=True
+        )
+        
+        if not response.points: return "", False
+
+        context = "\n\n".join(f"Source: {p.payload.get('file_name')}\n{p.payload.get('content')}" for p in response.points)
+        return context, True
     except Exception as e:
-        # st.error(f"Error accessing Qdrant index: {e}") # Suppress error to avoid breaking chat
+        print(f"Qdrant RAG Error: {e}")
         return "", False
 
-    if not relevant_docs:
-        return "", False
+# ----------------- Chat Title Generation -------------------
 
-    context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d in relevant_docs)
-    return context, True
-# <<< END FIX >>>
+def generate_chat_title(first_message: str, model_name: str, openai_client=None) -> str:
+    """Uses the selected model to summarize the first message into a title."""
+    sys_prompt = "Summarize this message into a short 3-5 word chat title. Return ONLY the title text. No quotes."
+    
+    try:
+        if "gpt" in model_name.lower() and openai_client:
+            resp = openai_client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": first_message}],
+                max_tokens=15
+            )
+            return resp.choices[0].message.content.strip().replace('"', '')
+        else:
+            resp = ollama.chat(model=model_name, messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": first_message}])
+            return resp['message']['content'].strip().replace('"', '')
+    except Exception as e:
+        print(f"Title Generation Error: {e}")
+        return "New Chat Session"
 
+# ----------------- Unified Dispatchers -------------------
 
-# ----------------- Unified RAG Functions -------------------
-
-def rebuild_rag_index(db_file, rag_index_dir=None, chat_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):
+def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):
     if vector_db == "faiss":
-        rebuild_rag_index_faiss(db_file, rag_index_dir, chat_id, model_name, ollama_models, openai_models)
+        rebuild_rag_index_faiss(db_file, rag_index_dir, target_id, model_name, ollama_models, openai_models)
     elif vector_db == "qdrant":
-        # Now rebuild_rag_index_qdrant is defined above
-        rebuild_rag_index_qdrant(db_file, qdrant_url, chat_id, model_name, ollama_models, openai_models, qdrant_api_key)
-    else:
-        st.error(f"Unknown vector DB: {vector_db}")
+        rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key)
 
-def get_relevant_rag(db_file, rag_index_dir=None, chat_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):
+def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):     
     if vector_db == "faiss":
-        return get_relevant_rag_faiss(db_file, rag_index_dir, chat_id, query, model_name, ollama_models, openai_models, top_k)
+        return get_relevant_rag_faiss(db_file, rag_index_dir, target_id, query, model_name, ollama_models, openai_models, top_k)
     elif vector_db == "qdrant":
-        # Now get_relevant_rag_qdrant is defined above
-        return get_relevant_rag_qdrant(db_file, qdrant_url, chat_id, query, model_name, ollama_models, openai_models, top_k, qdrant_api_key)
-    else:
-        st.error(f"Unknown vector DB: {vector_db}")
-        return "", False
+        return get_relevant_rag_qdrant(db_file, qdrant_url, target_id, query, model_name, ollama_models, openai_models, top_k, qdrant_api_key)

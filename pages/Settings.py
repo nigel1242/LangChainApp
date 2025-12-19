@@ -44,8 +44,15 @@ def main():
 
     # --- VOICE SELECTION SETTINGS ---
     st.subheader("Text-to-Speech (TTS) Voice Selection", anchor=False)
-    voice_options = ["alloy", "verse", "echo", "sage"]
+    voice_options = [ 'alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'ash', 'sage', 'coral']
     current_voice = st.session_state.get("tts_voice", "alloy")
+    
+    if st.button("▶️ Preview Selected Voice"):
+        preview_text = f"Hello, I am the {st.session_state.tts_voice} voice. How do I sound?"
+        from app import speak_text 
+        audio_bytes = speak_text(preview_text)
+        if audio_bytes:
+            st.audio(audio_bytes, format="audio/mp3")
 
     st.session_state.tts_voice = st.selectbox(
         "🎧 Select Voice for Answer Audio (OpenAI TTS)",
@@ -55,7 +62,6 @@ def main():
         else 0,
         help="This voice will be used for generated audio responses."
     )
-    st.info(f"Current TTS Voice: **{st.session_state.tts_voice}**")
     st.divider()
 
     # --- 1. Get List of Installed Models ---
