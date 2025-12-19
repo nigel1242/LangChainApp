@@ -1,10 +1,20 @@
+<<<<<<< HEAD
+=======
+# pages/Quiz.py
+
+from __future__ import annotations
+
+>>>>>>> 8ceca31ede98f02159ad5659ecbf08a129475cff
 import os
 import time
 from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 import ollama
+<<<<<<< HEAD
 from openai import OpenAI
+=======
+>>>>>>> 8ceca31ede98f02159ad5659ecbf08a129475cff
 
 # --- Local Module Imports ---
 from modules.db_manager import DBManager
@@ -24,10 +34,14 @@ from modules.quizstats.progress_store import (
 )
 from modules.quizstats.subject_store import ensure_subject_folders # Keep for folder creation
 
+<<<<<<< HEAD
 # --- CONFIG ---
 CHAT_DB_FILE = "chat_playground.db"
 RAG_INDEX_DIR = "rag_indices"
 
+=======
+# ---------- PAGE CONFIG ----------
+>>>>>>> 8ceca31ede98f02159ad5659ecbf08a129475cff
 st.set_page_config(page_title="Quiz Builder", page_icon="📝", layout="wide")
 load_dotenv()
 
@@ -36,6 +50,7 @@ is_authenticated, username = check_authentication()
 if not is_authenticated:
     login_page()
     st.stop()
+<<<<<<< HEAD
 
 # ---------- DB MANAGER & STATE ----------
 db = DBManager(backend="sqlite", db_file=CHAT_DB_FILE)
@@ -45,6 +60,18 @@ init_stats_db()
 if "current_subject" not in st.session_state:
     st.session_state.current_subject = "General"
 
+=======
+
+# ---------- SESSION DEFAULTS ----------
+defaults = {
+    "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
+    "selected_model": None,
+}
+for key, val in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = val
+
+>>>>>>> 8ceca31ede98f02159ad5659ecbf08a129475cff
 if "quiz_state" not in st.session_state:
     st.session_state.quiz_state = {
         "uploads_buffer": [],
@@ -59,6 +86,14 @@ if "quiz_state" not in st.session_state:
 
 S = st.session_state.quiz_state
 
+<<<<<<< HEAD
+=======
+# ensure stats DB exists
+init_stats_db()
+init_subject_db()
+
+
+>>>>>>> 8ceca31ede98f02159ad5659ecbf08a129475cff
 # ---------- SIDEBAR ----------
 with st.sidebar:
     st.markdown(f"**Logged in as: {username}**")
@@ -66,6 +101,7 @@ with st.sidebar:
         logout()
         st.rerun()
     st.markdown("---")
+<<<<<<< HEAD
     
     # Subject Selector moved to Sidebar for consistency with app.py
     st.header("📚 Subject Library")
@@ -163,37 +199,257 @@ if st.button("🎲 Generate 10 Questions from Subject"):
                 "answered": {}, "submitted": {}, "corpus": corpus
             })
             st.success("Quiz Generated!")
+=======
+
+    st.header("🔑 API Keys")
+    with st.expander("Manage Keys"):
+        if st.session_state.openai_api_key:
+            st.success("OpenAI API Key loaded")
+            override_key = st.text_input(
+                "Override OpenAI API Key (optional)",
+                type="password",
+                placeholder="Leave empty to use existing key",
+                key="quiz_openai_override",
+            )
+            if override_key:
+                st.session_state.openai_api_key = override_key.strip()
+                os.environ["OPENAI_API_KEY"] = st.session_state.openai_api_key
+                st.success("Using custom API key")
+        else:
+            api_key_input = st.text_input(
+                "Enter your OpenAI API Key",
+                type="password",
+                key="quiz_openai_input",
+            )
+            if api_key_input:
+                st.session_state.openai_api_key = api_key_input.strip()
+                os.environ["OPENAI_API_KEY"] = st.session_state.openai_api_key
+                st.success("API key saved")
+                st.rerun()
+
+# ---------- HEADER ----------
+st.title("📝 Quiz Builder (Subjects + Files + 10 MCQs)")
+st.caption("Upload files → Process → Generate 10 Questions → Answer → Stats records per question.")
+
+
+# >>> START: MODEL SELECTOR (MAIN BODY) <<<
+def get_model_display_name(model_id: str) -> str:
+    if model_id == "gpt-3.5-turbo":
+        return "OpenAI GPT-3.5 Turbo"
+    if model_id == "gpt-4":
+        return "OpenAI GPT-4"
+    if model_id == "gpt-4o-mini":
+        return "OpenAI GPT-4o Mini"
+    if model_id == "gpt-4o":
+        return "OpenAI GPT-4o"
+    if model_id == "llama3:8b":
+        return "Ollama Llama 3 (8B)"
+    if model_id == "qwen2.5vl:7b":
+        return "Ollama Qwen 2.5 VL (7B)"
+    return model_id.replace("-", " ").title()
+
+
+try:
+    raw_ollama_models = (m["model"] for m in ollama.list().get("models", []))
+    ollama_models = tuple(m for m in raw_ollama_models if not m.startswith("nomic-embed-text"))
+except Exception:
+    ollama_models = ()
+
+openai_models = ()
+if st.session_state.get("openai_api_key"):
+    # add whatever you want available
+    openai_models = ("gpt-4o-mini", "gpt-4o", "gpt-4", "gpt-3.5-turbo")
+
+available_models = ollama_models + openai_models
+display_models = [get_model_display_name(m) for m in available_models]
+
+if not available_models:
+    st.warning("⚠️ No models available. Check Ollama server or OpenAI key.")
+    st.stop()
+
+if st.session_state.selected_model in available_models:
+    default_index = available_models.index(st.session_state.selected_model)
+else:
+    st.session_state.selected_model = available_models[0]
+    default_index = 0
+
+selected_display_name = st.selectbox(
+    "🧠 Choose model for Quiz Generation",
+    display_models,
+    index=default_index,
+    key="quiz_model_selector_main",
+)
+
+selected_index = display_models.index(selected_display_name)
+selected_model_id = available_models[selected_index]
+st.session_state.selected_model = selected_model_id
+
+st.markdown("---")
+# >>> END: MODEL SELECTOR <<<
+
+
+# ---------- SUBJECTS: CREATE / SELECT ----------
+left, right = st.columns([1, 1])
+
+with left:
+    st.subheader("📚 Subjects")
+
+    subjects = list_subjects()
+    subject_names = [s["name"] for s in subjects]
+
+    PLACEHOLDER = "— select —"
+    existing_names = [PLACEHOLDER] + subject_names
+
+    default_label = S["selected_subject"] if S["selected_subject"] in subject_names else PLACEHOLDER
+    default_index = existing_names.index(default_label)
+
+    selected_label = st.selectbox(
+        "Choose existing subject",
+        existing_names,
+        index=default_index,
+        key="subject_selector_main",
+    )
+
+    S["selected_subject"] = None if selected_label == PLACEHOLDER else selected_label
+
+    if S["selected_subject"]:
+        st.markdown("### Delete Subject")
+        if st.button(
+            f"🗑️ Delete subject '{S['selected_subject']}'",
+            type="secondary",
+            key="delete_subject_btn",
+        ):
+            try:
+                clear_subject_stats(S["selected_subject"])
+            except Exception as e:
+                st.warning(f"Could not clear stats for subject: {e}")
+
+            ok, msg = delete_subject(S["selected_subject"])
+            if ok:
+                st.success(msg + " All quiz stats for this subject were cleared.")
+                S["selected_subject"] = None
+                S["quiz"] = []
+                S["current_idx"] = 0
+                S["score"] = 0
+                S["answered"] = {}
+                S["submitted"] = {}
+                S["corpus"] = ""
+                S["show_image"] = {}
+                st.rerun()
+            else:
+                st.error(msg)
+
+with right:
+    st.subheader("➕ New Subject")
+
+    S["new_subject_name"] = st.text_input(
+        "Create a new subject:",
+        value=S["new_subject_name"],
+        key="new_subject_name",
+    )
+
+    if st.button("Create Subject", key="create_subject_btn"):
+        ok, msg = create_subject_if_missing(S["new_subject_name"])
+        if ok:
+            st.success(f"Created subject '{S['new_subject_name']}'")
+            S["selected_subject"] = S["new_subject_name"]
+            S["new_subject_name"] = ""
+            st.rerun()
+        else:
+            st.error(msg)
+
+if not S["selected_subject"]:
+    st.info("Select a subject on the left or create a new one.")
+    st.stop()
+
+# Ensure folder layout
+subject_root = ensure_subject_folders(S["selected_subject"])
+
+# ---------- FILE UPLOAD ----------
+st.markdown("### 📤 Upload Files (TXT, DOCX, PPTX, CSV, PDF)")
+uploaded = st.file_uploader(
+    "Drag and drop multiple files",
+    type=["txt", "md", "pdf", "PDF", "docx", "pptx", "csv"],
+    accept_multiple_files=True,
+    key="quiz_uploader",
+)
+if uploaded:
+    S["uploads_buffer"] = uploaded
+
+if st.button("📦 Process Uploaded Files"):
+    if not S["uploads_buffer"]:
+        st.warning("No files selected.")
+    elif not st.session_state.selected_model:
+        st.error("Please select a model above before processing.")
+    else:
+        with st.spinner("Processing files and rebuilding index (page_index.json)..."):
+            saved = save_uploaded_files(S["selected_subject"], S["uploads_buffer"])
+            S["uploads_buffer"] = []
+
+            corpus = extract_corpus_for_subject(S["selected_subject"])
+
+            meta = get_subject_meta(S["selected_subject"]) or {}
+            meta["last_indexed_ms"] = int(time.time() * 1000)
+            meta["char_count"] = len(corpus)
+            save_subject_meta(S["selected_subject"], meta)
+
+            st.success(f"Processed {len(saved)} file(s). Indexed {len(corpus):,} characters.")
+
+        st.rerun()
+
+
+# ---------- BUILD / START QUIZ ----------
+st.markdown("### 🧠 Generate Quiz (10 MCQs)")
+
+if st.button("🎲 Generate 10 Questions"):
+    corpus = extract_corpus_for_subject(S["selected_subject"])
+    if not corpus.strip():
+        st.warning("No text in this subject yet. Please upload/process files first.")
+    else:
+        if not st.session_state.selected_model:
+            st.error("Please select a model above first.")
+            st.stop()
+
+        quiz = build_quiz_from_corpus(
+            corpus_text=corpus,
+            subject=S["selected_subject"],
+            n_questions=10,  # ✅ ALWAYS 10
+            model_name=st.session_state.selected_model,
+        )
+
+        if not quiz:
+            st.error("Could not generate quiz questions. Try another model or re-process files.")
+            st.stop()
+
+        S["quiz"] = quiz
+        S["current_idx"] = 0
+        S["score"] = 0
+        S["answered"] = {}
+        S["submitted"] = {}
+        S["corpus"] = corpus
+        S["show_image"] = {}
+        st.success("Quiz ready! Scroll down to answer.")
+
+
+>>>>>>> 8ceca31ede98f02159ad5659ecbf08a129475cff
 # ---------- QUIZ PLAYER ----------
 if S["quiz"]:
     st.divider()
     q_idx = S["current_idx"]
     q = S["quiz"][q_idx]
 
-    # --- helper to decide if visual context is useful (for caption only) ---
+    # helper: detect likely visual question
     def _question_needs_visual(qdict):
-        text = (
-            (qdict.get("question", "") + " " + " ".join(qdict.get("choices", []))).lower()
-        )
+        text = ((qdict.get("question", "") + " " + " ".join(qdict.get("choices", []))).lower())
         visual_words = [
-            "graph",
-            "plot",
-            "chart",
-            "bar chart",
-            "line chart",
-            "histogram",
-            "scatter",
-            "table",
-            "diagram",
-            "figure",
-            "workflow",
-            "curve",
-            "regression",
+            "graph", "plot", "chart", "bar chart", "line chart",
+            "histogram", "scatter", "table", "diagram", "figure",
+            "workflow", "curve", "regression",
         ]
         return qdict.get("needs_image", False) or any(w in text for w in visual_words)
 
     needs_visual = _question_needs_visual(q)
 
-    # --- 'Show related context' button ---
     st.markdown("#### 🔍 Need context?")
     show_now = S["show_image"].get(q_idx, False)
     if st.button("👁 Show related context", key=f"show_img_{q_idx}"):
@@ -201,19 +457,13 @@ if S["quiz"]:
         S["show_image"][q_idx] = True
 
     if show_now:
-        # Prefer the exact slide/page that was stored with the question
         ctx = q.get("context_meta") or {}
         entry = None
 
-        if ctx.get("file_path") and ctx.get("type") in ("pdf_page", "pptx_slide"):
+        if ctx.get("file_path") and ctx.get("type") in ("pdf_page", "pptx_slide", "pptx_slide", "docx_chunk", "text_file", "csv_file"):
             entry = ctx
         else:
-            # Fallback: semantic search if context_meta is missing
-            img_query = (
-                q.get("image_hint")
-                or q.get("source_hint")
-                or q.get("question", "")
-            )
+            img_query = q.get("image_hint") or q.get("topic") or q.get("question", "")
             entry = find_relevant_context_for_text(S["selected_subject"], img_query)
 
         if entry:
@@ -227,32 +477,24 @@ if S["quiz"]:
                 if img is not None:
                     caption = f"Context from {fname} (PDF page {page_num})"
                     if needs_visual:
-                        caption += " – this question is likely image-based."
-                    st.image(img, caption=caption, width="stretch")
+                        caption += " – likely image-based."
+                    st.image(img, caption=caption, use_container_width=True)
                 else:
                     st.caption(f"Open PDF: `{pdf_path}` (page {page_num})")
 
             elif etype == "pptx_slide":
                 pptx_path = entry.get("file_path")
                 slide_num = entry.get("slide", 1)
-                img = None
-                try:
-                    img = render_pptx_slide_image(pptx_path, slide_num)
-                except Exception as e:
-                    st.caption(f"PPTX render error: {e}")
-
+                img = render_pptx_slide_image(pptx_path, slide_num)
                 if img is not None:
-                    caption = f"Context from {fname} (PowerPoint slide {slide_num})"
+                    caption = f"Context from {fname} (PPTX slide {slide_num})"
                     if needs_visual:
-                        caption += " – this question is likely image-based."
-                    st.image(img, caption=caption, width="stretch")
+                        caption += " – likely image-based."
+                    st.image(img, caption=caption, use_container_width=True)
                 else:
-                    st.caption(
-                        f"Context from {fname} (slide {slide_num}) – unable to render image."
-                    )
+                    st.caption(f"Context from {fname} (slide {slide_num}) – unable to render image.")
 
             else:
-                # Non-PDF / non-PPTX context: show a text snippet
                 full_text = entry.get("text", "")
                 snippet = full_text[:800] + ("..." if len(full_text) > 800 else "")
                 st.markdown(f"**Context from {fname}**")
@@ -260,13 +502,13 @@ if S["quiz"]:
         else:
             st.caption("No matching context found for this question.")
 
-    # --- Question text + options ---
-    st.subheader(f"Question {S['current_idx']+1} of {len(S['quiz'])}")
+    # Question header
+    st.subheader(f"Question {S['current_idx'] + 1} of {len(S['quiz'])}")
     difficulty = q.get("difficulty")
     if difficulty:
         st.caption(f"Difficulty: {difficulty}")
 
-    # Allow Markdown/LaTeX in question text
+    # ✅ Allow LaTeX
     st.markdown(q["question"])
 
     choice_labels = [f"{i+1}. {c}" for i, c in enumerate(q["choices"])]
@@ -289,34 +531,42 @@ if S["quiz"]:
                 S["answered"][q_idx] = {
                     "picked": picked_idx,
                     "correct": is_correct,
-                    "already_counted": S["answered"].get(q_idx, {}).get(
-                        "already_counted", False
-                    ),
+                    "already_counted": S["answered"].get(q_idx, {}).get("already_counted", False),
                 }
                 S["submitted"] = S.get("submitted", {})
                 S["submitted"][q_idx] = True
 
-                # ----- UPDATE SCORE + FEEDBACK -----
                 if is_correct:
                     if not S["answered"][q_idx]["already_counted"]:
                         S["score"] += 1
                         S["answered"][q_idx]["already_counted"] = True
                     st.success("✅ Correct! Nice job.")
                 else:
-                    st.error("❌ Incorrect. Let's review this concept.")
+                    st.error("❌ Incorrect.")
                     st.caption(f"Answer: {q['choices'][correct_idx]}")
 
                 explanation = q.get("explanation", "")
                 if explanation:
-                    # explanation might contain LaTeX, so use markdown
-                    st.markdown(explanation)
+                    st.markdown(explanation)  # ✅ LaTeX ok
 
                 # ----- RECORD STATS -----
                 try:
                     ts_ms = int(time.time() * 1000)
                     chosen_text = q["choices"][picked_idx]
                     correct_text = q["choices"][correct_idx]
-                    topic = q.get("topic") or (q.get("image_hint") or "")
+
+                    # ✅ Topic: guaranteed non-empty
+                    topic = (q.get("topic") or "").strip()
+                    if not topic:
+                        topic = (q.get("image_hint") or "").strip()
+                    if not topic:
+                        ctx = q.get("context_meta") or {}
+                        fname = (ctx.get("file") or "").strip()
+                        if fname:
+                            topic = fname
+                    if not topic:
+                        topic = "General"
+
                     source_hint = q.get("source_hint") or ""
                     diff = q.get("difficulty") or "unknown"
 
@@ -342,6 +592,7 @@ if S["quiz"]:
             else:
                 if S["current_idx"] < len(S["quiz"]) - 1:
                     S["current_idx"] += 1
+                    st.rerun()
                 else:
                     st.info("That was the last question.")
 
