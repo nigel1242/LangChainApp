@@ -339,12 +339,16 @@ def main():
         db.add_message(chat_id, "user", user_p)
         st.session_state.messages.append({"role": "user", "content": user_p})
 
-        # NEW: Generate title for new chats
+        # ----- Title Generation -------
         if is_new_chat:
             from modules.functions import generate_chat_title
             client_openai = get_openai_client() if "gpt" in st.session_state.selected_model else None
             new_title = generate_chat_title(user_p, st.session_state.selected_model, client_openai)
             db.update_chat_title(chat_id, new_title)
+
+        # --- Add user prompt first ---
+        with message_container.chat_message("user", avatar="😎"):
+            st.markdown(user_p)
 
         # --- SYNCED RAG SEARCH ---
         rag_content, has_docs = "", False
@@ -357,7 +361,7 @@ def main():
             # Determining which backend to search
             if st.session_state.vector_db == "qdrant" and HAS_QDRANT_HELPER:
                 try:
-                    rag_content, has_docs = get_relevant_rag(
+                    rag_content, raw_docs, has_docs = get_relevant_rag(
                         CHAT_DB_FILE, 
                         subject_index_dir,
                         search_id, # Using synced ID
@@ -373,10 +377,10 @@ def main():
                     st.error(f"Qdrant Error: {e}")
             else:
                 with st.spinner("📂 Searching Local Index..."):
-                    rag_content, has_docs = get_relevant_rag(
+                    rag_content, raw_docs, has_docs = get_relevant_rag(
                         CHAT_DB_FILE, 
                         subject_index_dir, 
-                        search_id, # Using synced ID
+                        search_id,
                         user_p, 
                         st.session_state.selected_model, 
                         ollama_models, 
