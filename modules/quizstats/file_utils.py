@@ -11,8 +11,12 @@ import fitz  # PyMuPDF
 from PIL import Image
 from docx import Document as DocxDocument
 from docx.opc.exceptions import PackageNotFoundError
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pptx import Presentation
 import pandas as pd
+import win32com
+import pythoncom
+from langchain_core.documents import Document
 
 from modules.quizstats.subject_store import SUBJECTS_DIR
 
@@ -73,6 +77,94 @@ def save_uploaded_files(subject_name: str, files) -> List[str]:
 
 
 # ------------ text extraction helpers ------------
+
+def extract_text_from_file(path: str) -> list[Document]:
+    ext = os.path.splitext(path)[1].lower()
+    file_name = os.path.basename(path)
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
+
+    docs: list[Document] = []
+
+    # ---------- PDF ----------
+    if ext == ".pdf":
+        pages = _pdf_page_texts_for_index(path)
+        for page_num, page_text in enumerate(pages, start=1):
+            for chunk in splitter.split_text(page_text):
+                docs.append(
+                    Document(
+                        page_content=chunk,
+                        metadata={
+                            "file": file_name,
+                            "page": page_num,
+                            "type": "pdf_page"
+                        }
+                    )
+                )
+
+    # ---------- PPTX ----------
+    elif ext == ".pptx":
+        slides = _pptx_slide_texts_for_index(path)
+        for slide_num, slide_text in enumerate(slides, start=1):
+            for chunk in splitter.split_text(slide_text):
+                docs.append(
+                    Document(
+                        page_content=chunk,
+                        metadata={
+                            "file": file_name,
+                            "slide": slide_num,
+                            "type": "pptx_slide"
+                        }
+                    )
+                )
+
+    # ---------- DOCX ----------
+    elif ext == ".docx":
+        sections = _docx_sections_for_index(path)
+        for section in sections:
+            for chunk in splitter.split_text(section):
+                docs.append(
+                    Document(
+                        page_content=chunk,
+                        metadata={
+                            "file": file_name,
+                            "type": "docx_section"
+                        }
+                    )
+                )
+
+    # ---------- TXT ----------
+    elif ext == ".txt":
+        text = _read_text_file(path)
+        for chunk in splitter.split_text(text):
+            docs.append(
+                Document(
+                    page_content=chunk,
+                    metadata={
+                        "file": file_name,
+                        "type": "txt"
+                    }
+                )
+            )
+
+    # ---------- CSV ----------
+    elif ext == ".csv":
+        text = _extract_text_csv(path)
+        for chunk in splitter.split_text(text):
+            docs.append(
+                Document(
+                    page_content=chunk,
+                    metadata={
+                        "file": file_name,
+                        "type": "csv"
+                    }
+                )
+            )
+
+    return docs
 
 def _read_text_file(path: str) -> str:
     try:
@@ -623,58 +715,55 @@ def render_pdf_page_image(pdf_path: str, page_number: int):
 
 
 def render_pptx_slide_image(pptx_path: str, slide_number: int):
-    """
-    Return a PIL.Image of a specific 1-based PowerPoint slide, or None if fail.
-
-    Uses the local PowerPoint application via COM (pywin32). We explicitly call
-    CoInitialize / CoUninitialize so it works inside Streamlit's worker thread.
-    """
-    try:
-        import win32com.client  # type: ignore
-        import pythoncom        # type: ignore
-    except ImportError:
-        print("[file_utils] pywin32/pythoncom not installed; cannot render PPTX slides.")
-        return None
-
     powerpoint = None
     presentation = None
     try:
-        # IMPORTANT: initialize COM in this thread
         pythoncom.CoInitialize()
+        
+        # Use DispatchEx to ensure we get a fresh, separate process
+        powerpoint = win32com.client.DispatchEx("PowerPoint.Application")
+        
+        # Absolute path is required for COM
+        abs_path = os.path.abspath(pptx_path)
+        
+        # Open with specific flags: ReadOnly=True, WithWindow=False
+        # This prevents PowerPoint from asking "Do you want to save changes?"
+        presentation = powerpoint.Presentations.Open(abs_path, ReadOnly=True, WithWindow=False)
 
-        powerpoint = win32com.client.Dispatch("PowerPoint.Application")
-        presentation = powerpoint.Presentations.Open(pptx_path, WithWindow=False)
-
-        if presentation.Slides.Count == 0:
+        if not presentation:
             return None
 
-        idx = max(1, min(slide_number, presentation.Slides.Count))
-        slide = presentation.Slides[idx]
+        # Fix Indexing
+        idx = int(slide_number)
+        idx = max(1, min(idx, presentation.Slides.Count))
+        
+        slide = presentation.Slides(idx)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            out_path = os.path.join(tmpdir, f"slide_{idx}.png")
+            out_path = os.path.join(tmpdir, "slide_export.png")
             slide.Export(out_path, "PNG")
             img = Image.open(out_path)
             img.load()
+            
+        # Close presentation explicitly BEFORE quitting the app
+        presentation.Close()
+        presentation = None # Clear reference
+        
         return img
 
     except Exception as e:
-        print(
-            f"[file_utils] PPTX render error for {pptx_path} slide {slide_number}: {e}"
-        )
+        print(f"[file_utils] PPTX Render Error: {e}")
         return None
     finally:
+        # Robust cleanup to avoid "Open.Close" errors
         try:
             if presentation is not None:
                 presentation.Close()
-        except Exception:
+        except:
             pass
         try:
             if powerpoint is not None:
                 powerpoint.Quit()
-        except Exception:
+        except:
             pass
-        try:
-            pythoncom.CoUninitialize()
-        except Exception:
-            pass
+        pythoncom.CoUninitialize()

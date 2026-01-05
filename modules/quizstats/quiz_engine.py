@@ -410,65 +410,50 @@ def build_quiz_from_corpus(
 
 def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: str = "faiss") -> List[Dict[str, Any]]:
     from modules.functions import get_relevant_rag
-    import os
     import random
 
-    # 1. NEW PATH LOGIC: Point directly to the subject folder
     subject_dir = os.path.join("modules", "subjects", subject)
-    
-    # 2. SUFFIX LOGIC: Match the index naming convention
     is_openai = "gpt" in model_name.lower()
     suffix = "openai" if is_openai else "ollama"
 
-    # Setup model lists for the dispatcher
-    try:
-        import ollama
-        raw_ollama = [m["model"] for m in ollama.list().get("models", [])]
-        ollama_models = tuple(raw_ollama)
-    except:
-        ollama_models = ()
-    openai_models = ("gpt-4o-mini", "gpt-4o", "gpt-4")
-
-    # 3. RETRIEVAL: Using the updated directory and suffix
-    # Note: Added 'suffix' parameter to match your functions.py logic
-    rag_content, has_docs = get_relevant_rag(
+    # 1️⃣ Retrieve top chunks from FAISS
+    rag_content, raw_docs, success = get_relevant_rag(
         db_file="chat_playground.db",
-        rag_index_dir=subject_dir, # Looking in modules/subjects/Dava/
+        rag_index_dir=subject_dir,
         target_id=subject,
-        query=f"Generate quiz questions about {subject}",
+        query=f"Generate comprehensive quiz questions about {subject}",
         model_name=model_name,
-        ollama_models=ollama_models,
-        openai_models=openai_models,
-        top_k=15,
+        top_k=50,  # get enough top chunks for diversity
         vector_db=vector_db,
-        suffix=suffix # This ensures it opens index_ollama or index_openai
+        suffix=suffix
     )
 
-    if not has_docs or not rag_content.strip():
-        print(f"[quiz_engine] Critical: No {suffix} index found for {subject} at {subject_dir}")
+    if not success or not raw_docs:
         return []
 
-    # 4. GENERATION
-    call_fn = _call_openai_for_chunk if is_openai else _call_ollama_for_chunk
-    
-    # Split the retrieved text into manageable pieces for the LLM
-    chunks = _split_corpus_into_chunks(rag_content)
-    random.shuffle(chunks)
-    quiz = []
+    # 2️⃣ Shuffle top docs/chunks to prevent repeated slides
+    random.shuffle(raw_docs)
 
-    for chunk in chunks:
-        if len(quiz) >= n_questions: 
+    from modules.quizstats.quiz_engine import _call_ollama_for_chunk, _call_openai_for_chunk
+    call_fn = _call_openai_for_chunk if is_openai else _call_ollama_for_chunk
+
+    final_quiz = []
+    for doc in raw_docs:
+        if len(final_quiz) >= n_questions:
             break
-        
+
         try:
-            # Generate 1-2 questions per chunk to ensure variety
-            qs = call_fn(model_name, chunk, subject, max_q=2) 
+            # Generate 1 question per top doc/chunk
+            qs = call_fn(model_name, doc.page_content, subject, max_q=1)
             for q in qs:
-                # Basic duplicate prevention
-                if all(q["question"] != e["question"] for e in quiz):
-                    quiz.append(q)
+                # Attach the chunk’s metadata so the UI shows the correct slide/page
+                q["context_meta"] = doc.metadata
+
+                # Avoid duplicate questions
+                if all(q["question"] != e["question"] for e in final_quiz):
+                    final_quiz.append(q)
         except Exception as e:
-            print(f"LLM Generation Error for chunk: {e}")
+            print(f"Error generating question: {e}")
             continue
 
-    return quiz[:n_questions]
+    return final_quiz

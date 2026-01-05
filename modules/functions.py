@@ -19,6 +19,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
+from modules.quizstats.file_utils import _pdf_page_texts_for_index, _pptx_slide_texts_for_index
+
 # Dictionary to store active FAISS index references to prevent file locking
 _LOADED_FAISS_INDEXES = {}
 
@@ -136,42 +138,44 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
     all_docs = []
     splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
     
-    for content, file_name in rows:
-        if not content: continue
+    for _, file_name in rows:
+        raw_path = os.path.join(subject_dir, "raw", file_name)
+        ext = file_name.lower()
 
-        # 1. Base metadata shared by all chunks of this file
-        base_meta = {
-            "source": file_name,
-            "file": file_name,
-            "file_path": os.path.join(subject_dir, "raw", file_name),
-            "type": "pdf_page" if file_name.lower().endswith(".pdf") else "pptx_slide" if file_name.lower().endswith(".pptx") else "text_file"
-        }
+        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
 
-        # 2. Use Regex to split by the markers we created in the extraction step
-        # This regex looks for either '--- Slide X ---' or '--- Page X ---'
-        parts = re.split(r"--- (?:Slide|Page) (\d+) ---", content)
-        
-        if len(parts) > 1:
-            # We found markers! 
-            # Parts[0] is text before the first marker.
-            # Then it alternates: Parts[1]=Number, Parts[2]=Text, Parts[3]=Number...
-            for i in range(1, len(parts), 2):
-                num = int(parts[i])
-                page_text = parts[i+1]
-                
-                chunks = splitter.split_text(page_text)
-                for chunk in chunks:
-                    meta = base_meta.copy()
-                    meta["page"] = num    # Add to the metadata list
-                    meta["slide"] = num   # Add to the metadata list
-                    all_docs.append(Document(page_content=chunk, metadata=meta))
-        else:
-            # No markers found (e.g., a .txt or .docx file)
-            chunks = splitter.split_text(content)
-            for chunk in chunks:
-                all_docs.append(Document(page_content=chunk, metadata=base_meta.copy()))
+        # ---------- PDF ----------
+        if ext.endswith(".pdf"):
+            pages = _pdf_page_texts_for_index(raw_path)
+            for page_num, page_text in enumerate(pages, start=1):
+                for chunk_idx, chunk in enumerate(splitter.split_text(page_text), start=1):
+                    all_docs.append(Document(
+                        page_content=chunk,
+                        metadata={
+                            "file": file_name,
+                            "file_path": raw_path,
+                            "page": page_num,
+                            "chunk": chunk_idx,
+                            "type": "pdf_page"
+                        }
+                    ))
 
-    if not all_docs: return
+        # ---------- PPTX ----------
+        elif ext.endswith(".pptx"):
+            slides = _pptx_slide_texts_for_index(raw_path)
+            for slide_num, slide_text in enumerate(slides, start=1):
+                for chunk_idx, chunk in enumerate(splitter.split_text(slide_text), start=1):
+                    all_docs.append(Document(
+                        page_content=chunk,
+                        metadata={
+                            "file": file_name,
+                            "file_path": raw_path,
+                            "slide": slide_num,
+                            "chunk": chunk_idx,
+                            "type": "pptx_slide"
+                        }
+                    ))
+            if not all_docs: return
 
     # 3. Embeddings & Saving
     if not suffix:
@@ -187,46 +191,55 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
     print(f"✅ Rebuilt index_{suffix} with page/slide metadata.")
 
 def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix=""):
-    """
-    Loads the correct FAISS index (ollama vs openai) from the subject folder.
-    """
-    # 1. Determine which index file to look for
-    suffix = "openai" if "gpt" in model_name.lower() else "ollama"
+    # 1. Determine index naming
+    if not suffix:
+        suffix = "openai" if "gpt" in model_name.lower() else "ollama"
     index_name = f"index_{suffix}"
     
-    # Check if the specific index exists
-    if not os.path.exists(os.path.join(subject_dir, f"{index_name}.faiss")):
-        # Fallback to the old 'index.faiss' if the new naming isn't used yet
-        if os.path.exists(os.path.join(subject_dir, "index.faiss")):
-            index_name = "index"
-        else:
-            return "No RAG index found. Please process files for this model.", False
+    # 2. Safety Check: Verify the file exists before attempting to load
+    index_path = os.path.join(subject_dir, f"{index_name}.faiss")
+    if not os.path.exists(index_path):
+        print(f"Index not found at: {index_path}")
+        return "No RAG index found. Please process files.", [], False
 
-    # 2. Setup Embeddings for the search query
+    # 3. Setup Embeddings
     if suffix == "openai":
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.get("openai_api_key"))
     else:
         embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
 
-    # 3. Load and Search
+    # 4. Load and Search with Error Handling
     try:
+        # Load the index
         faiss_index = FAISS.load_local(
             folder_path=subject_dir, 
             embeddings=embeddings, 
             index_name=index_name,
             allow_dangerous_deserialization=True
         )
+        
+        # Perform the search ONCE
         docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
         
-        context = "\n\n".join(
-            f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" 
-            for d, _ in docs_with_scores
-        )
-        return context, True
+        # Extract documents and build context
+        docs = [d for d, score in docs_with_scores]
+        context = "\n\n".join([d.page_content for d in docs])
+        
+        # --- DEBUG SECTION ---
+        # We use the existing docs_with_scores from the search above
+        for i, (doc, score) in enumerate(docs_with_scores):
+            print(f"--- Result {i} ---")
+            print(f"File: {doc.metadata.get('file')}")
+            print(f"Slide: {doc.metadata.get('slide')}")
+            print(f"Page: {doc.metadata.get('page')}")
+            snippet = doc.page_content[:50].replace("\n", " ")
+            print(f"Text Snippet: {snippet}...")
+        
+        return context, docs, True
+        
     except Exception as e:
-        st.error(f"Error accessing FAISS index '{index_name}': {e}")
-        return "", False
-
+        print(f"Error loading or searching FAISS: {e}")
+        return "", [], False
 # ----------------- RAG with Qdrant (Remote) -------------------
 
 def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollama_models, openai_models, qdrant_api_key=None):
@@ -315,8 +328,8 @@ def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=No
     elif vector_db == "qdrant":
         rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key)
 
-def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):     
+def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):    
     if vector_db == "faiss":
-        return get_relevant_rag_faiss(db_file, rag_index_dir, target_id, query, model_name, ollama_models, openai_models, top_k)
+        return get_relevant_rag_faiss(db_file, rag_index_dir, target_id, query, model_name, ollama_models, openai_models, top_k, suffix)
     elif vector_db == "qdrant":
         return get_relevant_rag_qdrant(db_file, qdrant_url, target_id, query, model_name, ollama_models, openai_models, top_k, qdrant_api_key)

@@ -204,6 +204,48 @@ if S["quiz"]:
     q = S["quiz"][q_idx]
 
     st.subheader(f"Question {q_idx + 1}")
+
+    # ---------- SHOW RELEVANT CONTEXT ----------
+    with st.expander(f"🔍 Show Relevant Context (Question {q_idx + 1})"):
+        from modules.quizstats.file_utils import render_pdf_page_image, render_pptx_slide_image
+        
+        meta = q.get("context_meta", {})
+        f_name = meta.get("file") or meta.get("source") or ""
+        f_type = meta.get("type")
+        
+        # Path reconstruction: Search the 'raw' folder of the current subject
+        f_path = os.path.join(SUBJECTS_DIR, S["selected_subject"], "raw", f_name)
+
+        if f_name and os.path.exists(f_path):
+            if f_type == "pptx_slide":
+                slide_num = meta.get("slide", 1)
+                img = render_pptx_slide_image(f_path, slide_num)
+                if img:
+                    # Use a container to hold the image
+                    img_container = st.container()
+                    
+                    unique_caption = f"Source: {f_name} | Slide {slide_num} (Q:{q_idx + 1})"
+                    
+                    img_container.image(
+                        img, 
+                        caption=unique_caption, 
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("Slide image could not be rendered.")
+            
+            elif f_type == "pdf_page":
+                page_num = meta.get("page", 1)
+                img = render_pdf_page_image(f_path, page_num)
+                if img:
+                    st.image(img, caption=f"Page {page_num} from {f_name}", use_container_width=True, key=f"img_q{q_idx}_s{page_num}")
+            
+            else:
+                st.info(f"Source: {f_name}")
+                st.write(q.get("explanation", "Refer to the source document."))
+        else:
+            st.error("Original source file not found.")
+            st.write(q.get("explanation", "No explanation provided."))
     st.markdown(q["question"])
     
     picked = st.radio("Choose one:", q["choices"], index=None, key=f"q_{q_idx}")
