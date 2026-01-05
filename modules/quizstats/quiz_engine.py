@@ -110,48 +110,42 @@ def _call_ollama_for_chunk(
     max_q: int,
     context_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Generates quiz questions using a local Ollama model."""
+    """Generates quiz questions using a local Ollama model with strict source grounding."""
 
     system_msg = (
-        "You are an expert exam question writer for a polytechnic module.\n"
-        "Your job is to create challenging, contextualised multiple-choice questions.\n"
-        "Use ONLY the provided notes; do not invent new data.\n"
-        "If the text references images/figures/tables, set `needs_image: true`.\n"
-        "Return a single JSON object ONLY (no markdown)."
+        "You are a strict academic examiner. Your priority is FACTUAL ACCURACY based ONLY on the provided notes.\n"
+        "1. Identify concepts ONLY found in the <notes>. Do NOT use general knowledge or outside software facts.\n"
+        "2. Create a question and 4 distinct options.\n"
+        "3. VERIFY: Ensure the 'answer_index' correctly matches the correct choice based on the notes.\n"
+        "4. Use LaTeX for math: enclose in $...$ and use double backslashes (\\\\).\n"
+        "Return valid JSON only."
     )
 
     user_prompt = f"""
-Generate up to {max_q} challenging MCQs from the notes below.
+Generate up to {max_q} challenging MCQs from the notes below for the subject: {subject}.
 
-Notes (from subject: {subject}):
 <notes>
 {chunk_text}
 </notes>
 
-RULES:
-- Questions must test concepts, not just copy numbers/labels.
-- EXACT 4 options.
-- EXACT 1 correct answer.
-- Include a short explanation.
-- Include difficulty: "easy", "medium", or "hard".
-- Include a short topic label (2–6 words) describing the concept (e.g. "Z-score calculation", "Scatter plots and correlation").
-- If notes refer to chart/table/figure/workflow, set:
-    "needs_image": true
-    "image_hint": phrase to locate this slide/page
-  else needs_image false.
+STRICT RULES:
+- Use ONLY the provided notes.
+- Do NOT invent data. For example, if Tableau is not in the notes, do not ask about it.
+- In the 'explanation', quote the specific sentence from the notes that supports the answer.
+- Ensure 'answer_index' (0-3) is 100% accurate.
 
-Return JSON ONLY in this format:
+JSON format:
 {{
   "questions": [
     {{
-      "question": "text (you may include LaTeX like $\\\\sigma = \\\\sqrt{{...}}$)",
+      "question": "text",
       "choices": ["A", "B", "C", "D"],
       "answer_index": 0,
-      "explanation": "...",
+      "explanation": "Fact Check: According to the notes, [Quote/Explanation]...",
       "needs_image": false,
       "image_hint": "",
       "difficulty": "medium",
-      "topic": "Short topic here"
+      "topic": "Topic Label"
     }}
   ]
 }}
@@ -165,7 +159,7 @@ Return JSON ONLY in this format:
                 {"role": "user", "content": user_prompt},
             ],
             options={
-                "temperature": 0.5,
+                "temperature": 0.1,  # Lowered for higher strictness
                 "num_predict": 4096,
             },
             format="json",
@@ -175,8 +169,7 @@ Return JSON ONLY in this format:
         print(f"[quiz_engine] Ollama error ({model_name}):", e)
         return []
 
-    return _parse_raw_quiz_json(raw, chunk_text, context_meta)
-
+    return _parse_raw_quiz_json(raw, chunk_text, context_meta) 
 
 # -------------------------------------------------------------
 #   OPENAI QUESTION GENERATOR
@@ -188,52 +181,42 @@ def _call_openai_for_chunk(
     max_q: int,
     context_meta: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Generates quiz questions using the OpenAI API."""
+    """Generates quiz questions using OpenAI with high-fidelity checks."""
 
     client = _get_openai_client()
-    if client is None:
-        print("[quiz_engine] OpenAI API key missing inside chunk call. Skipping.")
-        return []
+    if client is None: return []
 
     system_msg = (
-        "You are an expert exam question writer for a polytechnic module.\n"
-        "Your job is to create challenging, contextualised multiple-choice questions.\n"
-        "Use ONLY the provided notes; do not invent new data.\n"
-        "Return JSON only."
+        "You are a strict academic examiner. Your sole source of truth is the <notes> provided.\n"
+        "1. Do NOT use outside knowledge (e.g., general software facts) unless explicitly mentioned in the notes.\n"
+        "2. If the notes discuss 'Measure Names' in Tableau, use that. If they don't, do not invent the question.\n"
+        "3. Every question must have a 'Verified' explanation that quotes or paraphrases the notes."
     )
 
     user_prompt = f"""
-Generate up to {max_q} challenging MCQs from the notes below.
+Generate up to {max_q} MCQs from these notes.
 
-Notes (from subject: {subject}):
 <notes>
 {chunk_text}
 </notes>
 
-RULES:
-- Questions must test concepts, not just copy numbers/labels.
-- EXACT 4 options.
-- EXACT 1 correct answer.
-- Include a short explanation.
-- Include difficulty: "easy", "medium", or "hard".
-- Include a short topic label (2–6 words) describing the concept (e.g. "Z-score calculation", "Scatter plots and correlation").
-- If notes refer to chart/table/figure/workflow, set:
-    "needs_image": true
-    "image_hint": phrase to locate this slide/page
-  else needs_image false.
+MANDATORY CHECKS:
+1. Is the question testing a specific concept?
+2. Does the 'answer_index' (0-3) actually point to the correct answer?
+3. In the explanation, explicitly state: 'Fact check: [Concept] is defined as [Definition].'
 
-Return JSON ONLY in this format:
+Return JSON ONLY:
 {{
   "questions": [
     {{
-      "question": "text (you may include LaTeX like $\\\\sigma = \\\\sqrt{{...}}$)",
-      "choices": ["A", "B", "C", "D"],
+      "question": "...",
+      "choices": ["...", "...", "...", "..."],
       "answer_index": 0,
       "explanation": "...",
       "needs_image": false,
       "image_hint": "",
-      "difficulty": "medium",
-      "topic": "Short topic here"
+      "difficulty": "hard",
+      "topic": "..."
     }}
   ]
 }}
@@ -474,5 +457,71 @@ def build_quiz_from_corpus(
     if not quiz:
         # If no questions were generated (e.g., LLM errors, network problems), fall back
         return _fallback_quiz(corpus_text, subject, n_questions)
+
+    return quiz
+
+def build_quiz_from_rag(
+    subject: str,
+    model_name: str,
+    n_questions: int = 10,
+    vector_db: str = "faiss"
+) -> List[Dict[str, Any]]:
+    from modules.functions import get_relevant_rag
+    import random
+
+    # 1. PATH LOGIC: Try both 'Dava' and 'subject_Dava'
+    possible_ids = [f"subject_{subject}", subject]
+    rag_content = ""
+    has_docs = False
+
+    # Dispatcher setup
+    try:
+        raw_ollama = [m["model"] for m in ollama.list().get("models", [])]
+        ollama_models = tuple(raw_ollama)
+    except:
+        ollama_models = ()
+    openai_models = ("gpt-4o-mini", "gpt-4o", "gpt-4")
+
+    # 2. RETRIEVAL LOOP: Find which folder actually exists
+    for tid in possible_ids:
+        content, found = get_relevant_rag(
+            db_file="chat_playground.db",
+            rag_index_dir="rag_indices",
+            target_id=tid,
+            query=f"Overview of {subject}",
+            model_name=model_name,
+            ollama_models=ollama_models,
+            openai_models=openai_models,
+            top_k=15,
+            vector_db=vector_db
+        )
+        if found and content.strip():
+            rag_content = content
+            has_docs = True
+            break # Found the folder!
+
+    if not has_docs:
+        print(f"[quiz_engine] Critical: No FAISS index found for {subject}")
+        return []
+
+    # 3. GENERATION
+    is_openai = "gpt" in model_name.lower()
+    call_fn = _call_openai_for_chunk if is_openai else _call_ollama_for_chunk
+    
+    chunks = _split_corpus_into_chunks(rag_content)
+    random.shuffle(chunks)
+    quiz = []
+
+    for chunk in chunks:
+        if len(quiz) >= n_questions: break
+        
+        try:
+            qs = call_fn(model_name, chunk, subject, max_q=1, context_meta=None)
+            for q in qs:
+                if all(q["question"] != e["question"] for e in quiz):
+                    quiz.append(q)
+        except Exception as e:
+            print(f"LLM Error: {e}")
+            continue
 
     return quiz

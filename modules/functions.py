@@ -111,49 +111,93 @@ def speak_text(answer: str, openai_client: OpenAI, voice: str = "alloy") -> byte
 
 # ----------------- RAG with FAISS (Local) -------------------
 
-def rebuild_rag_index_faiss(db_file, rag_index_dir, target_name, model_name, ollama_models, openai_models):
+def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollama_models, openai_models, suffix=""):
+    """
+    Builds a FAISS index inside the subject folder.
+    suffix: 'ollama' or 'openai' to prevent overwriting.
+    """
+    # 1. Clear memory if this index was already loaded
     if target_name in _LOADED_FAISS_INDEXES:
         del _LOADED_FAISS_INDEXES[target_name]
         
+    # 2. Fetch documents from SQLite
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
     rows = cursor.fetchall()
     conn.close()
     
-    if not rows: return
+    if not rows: 
+        print(f"No documents found in DB for {target_name}")
+        return
 
+    # 3. Process Text into Chunks
     all_docs = []
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     for content, file_name in rows:
-        for chunk in splitter.split_text(content):
-            all_docs.append(Document(page_content=chunk, metadata={"source": file_name}))
+        if content:
+            for chunk in splitter.split_text(content):
+                all_docs.append(Document(page_content=chunk, metadata={"source": file_name}))
 
-    if model_name in ollama_models:
+    if not all_docs: return
+
+    # 4. Determine Embeddings and Filename
+    # If no suffix is passed, we guess based on model_name
+    if not suffix:
+        suffix = "openai" if "gpt" in model_name.lower() else "ollama"
+    
+    if suffix == "openai":
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    else:
         embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-    else:
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
 
+    # 5. Build and Save Index to modules/subjects/{target_name}/
+    index_name = f"index_{suffix}"
     faiss_index = FAISS.from_documents(all_docs, embeddings)
-    faiss_index_path = os.path.join(rag_index_dir, f"subject_{target_name}")
-    faiss_index.save_local(faiss_index_path)
+    
+    # Save directly into the subject folder
+    faiss_index.save_local(folder_path=subject_dir, index_name=index_name)
+    print(f"✅ Saved {index_name} to {subject_dir}")
 
-def get_relevant_rag_faiss(db_file, rag_index_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3):
-    faiss_index_path = os.path.join(rag_index_dir, f"subject_{target_name}")
-    if not os.path.exists(faiss_index_path): return "", False
+def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3):
+    """
+    Loads the correct FAISS index (ollama vs openai) from the subject folder.
+    """
+    # 1. Determine which index file to look for
+    suffix = "openai" if "gpt" in model_name.lower() else "ollama"
+    index_name = f"index_{suffix}"
+    
+    # Check if the specific index exists
+    if not os.path.exists(os.path.join(subject_dir, f"{index_name}.faiss")):
+        # Fallback to the old 'index.faiss' if the new naming isn't used yet
+        if os.path.exists(os.path.join(subject_dir, "index.faiss")):
+            index_name = "index"
+        else:
+            return "No RAG index found. Please process files for this model.", False
 
-    if model_name in ollama_models:
-        embeddings = OllamaEmbeddings("nomic-embed-text:v1.5")
-    else:
+    # 2. Setup Embeddings for the search query
+    if suffix == "openai":
         embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+    else:
+        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
 
+    # 3. Load and Search
     try:
-        faiss_index = FAISS.load_local(faiss_index_path, embeddings, allow_dangerous_deserialization=True)
+        faiss_index = FAISS.load_local(
+            folder_path=subject_dir, 
+            embeddings=embeddings, 
+            index_name=index_name,
+            allow_dangerous_deserialization=True
+        )
         docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
-        context = "\n\n".join(f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" for d, _ in docs_with_scores)
+        
+        context = "\n\n".join(
+            f"Source: {d.metadata.get('source','unknown')}\nContent: {d.page_content}" 
+            for d, _ in docs_with_scores
+        )
         return context, True
     except Exception as e:
-        st.error(f"Error accessing FAISS index: {e}")
+        st.error(f"Error accessing FAISS index '{index_name}': {e}")
         return "", False
 
 # ----------------- RAG with Qdrant (Remote) -------------------
@@ -238,9 +282,9 @@ def generate_chat_title(first_message: str, model_name: str, openai_client=None)
 
 # ----------------- Unified Dispatchers -------------------
 
-def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):
+def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):
     if vector_db == "faiss":
-        rebuild_rag_index_faiss(db_file, rag_index_dir, target_id, model_name, ollama_models, openai_models)
+        rebuild_rag_index_faiss(db_file, rag_index_dir, target_id, model_name, ollama_models, openai_models, suffix)
     elif vector_db == "qdrant":
         rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key)
 

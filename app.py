@@ -23,6 +23,8 @@ from modules.functions import (
     speak_text
 )
 from modules.login import check_authentication, login_page, logout
+from modules.quizstats.subject_store import ensure_subject_folders
+from modules.quizstats.file_utils import save_uploaded_files
 
 try:
     from modules.qdrant_db import search_rag_docs_qdrant
@@ -34,10 +36,15 @@ except Exception:
 load_dotenv()
 CHAT_DB_FILE = "chat_playground.db"
 RAG_INDEX_DIR = "rag_indices"
+SUBJECTS_DIR = os.path.join("modules", "subjects")
 os.makedirs(RAG_INDEX_DIR, exist_ok=True)
+os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
 # ------------------ CONFIG ------------------
 st.set_page_config(page_title="My Learning AI", page_icon="📚", layout="wide")
+
+def get_subject_index_path(subject_name):
+    return os.path.join(SUBJECTS_DIR, subject_name, "index.faiss")
 
 def get_openai_client() -> OpenAI:
     api_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
@@ -133,7 +140,13 @@ def main():
         with st.expander("➕ New Subject"):
             new_sub = st.text_input("Subject Name")
             if st.button("Create Subject") and new_sub.strip():
+                # 1. Update Database
                 db.add_subject(new_sub.strip())
+                
+                # 2. Create physical folders (subjects/Name/raw and subjects/Name/images)
+                # This call will now work because the import is global
+                ensure_subject_folders(new_sub.strip())
+                
                 st.session_state.current_subject = new_sub.strip()
                 st.session_state.current_chat_id = None
                 st.session_state.messages = []
@@ -209,7 +222,7 @@ def main():
         m_idx = available_technical.index(st.session_state.selected_model)
 
     selected_friendly = st.selectbox(
-        "🧠 Choose your intelligence", 
+        "Model Selection", 
         display_models, 
         index=m_idx, 
         disabled=st.session_state.current_chat_id is not None
@@ -218,54 +231,45 @@ def main():
     st.session_state.selected_model = available_technical[display_models.index(selected_friendly)]
 
     # ---------------- RAG UPLOADS ----------------
+    
     with st.expander(f"📤 Knowledge Base: {st.session_state.current_subject}"):
         uploaded = st.file_uploader("Add files", type=["txt", "pdf", "docx", "pptx", "csv"], accept_multiple_files=True)
         
         if uploaded:
             st.session_state.uploaded_files_to_process = uploaded
 
-        if st.button("📂 Process & Update Subject RAG"):
+        if st.button("📂 Process & Sync RAG"):
             target_sub = st.session_state.current_subject
+            subject_path = os.path.join(SUBJECTS_DIR, target_sub)
             
-            for f in st.session_state.uploaded_files_to_process:
-                if not f.name.lower().endswith((".png", ".jpg", ".jpeg")):
+            with st.spinner(f"Building Universal Knowledge Base for {target_sub}..."):
+                # 1. Save files and database text
+                ensure_subject_folders(target_sub)
+                save_uploaded_files(target_sub, st.session_state.uploaded_files_to_process)
+                
+                for f in st.session_state.uploaded_files_to_process:
                     content = extract_text_from_file(f)
-                    
-                    # --- CASE 1: QDRANT (Subject-Based Chunks) ---
-                    if st.session_state.vector_db == "qdrant":
-                        from modules.functions import RecursiveCharacterTextSplitter
-                        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-                        chunks = splitter.split_text(content)
-                        
-                        # Embeddings setup based on technical model ID
-                        if "gpt" in st.session_state.selected_model.lower():
-                            embeddings = OpenAIEmbeddings(api_key=st.session_state.openai_api_key)
-                        else:
-                            embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-
-                        with st.spinner(f"Uploading {f.name} to Qdrant subject: {target_sub}..."):
-                            for i, chunk in enumerate(chunks):
-                                vector_data = embeddings.embed_documents([chunk])[0]
-                                # ✅ target_id is now the Subject Name, ensuring shared access
-                                db.add_rag_doc(
-                                    target_id=target_sub, 
-                                    file_name=f.name,
-                                    content=chunk,
-                                    vector_data=vector_data
-                                )
-                    
-                    # --- CASE 2: FAISS (Local SQLite storage) ---
-                    else:
-                        if not db.file_exists_in_rag(target_sub, f.name):
-                            db.add_rag_doc(target_sub, f.name, content)
-
-            # Rebuild local index only if using FAISS
-            if st.session_state.vector_db == "faiss":
-                rebuild_rag_index(CHAT_DB_FILE, RAG_INDEX_DIR, target_sub, st.session_state.selected_model, ollama_models, openai_models)
-            
-            st.success(f"✅ Knowledge base for '{target_sub}' updated!")
-            st.session_state.uploaded_files_to_process = []
-            st.rerun()
+                    db.add_rag_doc(target_id=target_sub, file_name=f.name, content=content)
+                
+                # 2. BUILD OLLAMA-COMPATIBLE INDEX (Nomic)
+                rebuild_rag_index(
+                    CHAT_DB_FILE, subject_path, target_sub, 
+                    "llama3:8b", ollama_models, openai_models, 
+                    suffix="ollama" 
+                )
+                
+                # 3. BUILD OPENAI-COMPATIBLE INDEX (GPT)
+                if st.session_state.openai_api_key:
+                    os.environ["OPENAI_API_KEY"] = st.session_state.openai_api_key
+                    rebuild_rag_index(
+                        CHAT_DB_FILE, subject_path, target_sub, 
+                        "gpt-4o", ollama_models, openai_models, 
+                        suffix="openai"
+                    )
+                
+                st.success(f"✅ Success! {target_sub} is now portable and multi-model ready.")
+                st.session_state.uploaded_files_to_process = []
+                st.rerun()
 
     # ---------------- CHAT INTERFACE ----------------
     message_container = st.container(height=500)
@@ -312,7 +316,7 @@ def main():
             st.session_state.temp_prompt = typed_prompt
             clear_tts(); st.rerun()
 
-    # ---------------- PROCESSING ----------------
+# ---------------- PROCESSING ----------------
     if st.session_state.get("temp_prompt"):
         user_p = st.session_state.temp_prompt
         st.session_state.temp_prompt = None
@@ -332,45 +336,54 @@ def main():
 
         # NEW: Generate title for new chats
         if is_new_chat:
-            from modules.functions import generate_chat_title # Add this function to functions.py
+            from modules.functions import generate_chat_title
             client_openai = get_openai_client() if "gpt" in st.session_state.selected_model else None
-            
             new_title = generate_chat_title(user_p, st.session_state.selected_model, client_openai)
             db.update_chat_title(chat_id, new_title)
 
-        # --- SWITCHABLE RAG SEARCH ---
+        # --- SYNCED RAG SEARCH ---
         rag_content, has_docs = "", False
+        search_id = st.session_state.current_subject
+        subject_index_dir = os.path.join(SUBJECTS_DIR, search_id)
+
         if st.session_state.rag_enabled:
+            # Determining which backend to search
             if st.session_state.vector_db == "qdrant" and HAS_QDRANT_HELPER:
                 try:
                     rag_content, has_docs = get_relevant_rag(
                         CHAT_DB_FILE, 
-                        RAG_INDEX_DIR, 
-                        st.session_state.current_subject, 
+                        subject_index_dir,
+                        search_id, # Using synced ID
                         user_p, 
                         st.session_state.selected_model, 
                         ollama_models, 
                         openai_models, 
                         vector_db="qdrant",
-                        qdrant_url=st.session_state.qdrant_url,      # Ensure this is passed
-                        qdrant_api_key=st.session_state.qdrant_api_key # Ensure this is passed
+                        qdrant_url=st.session_state.qdrant_url,
+                        qdrant_api_key=st.session_state.qdrant_api_key
                     )
                 except Exception as e: 
                     st.error(f"Qdrant Error: {e}")
             else:
                 with st.spinner("📂 Searching Local Index..."):
                     rag_content, has_docs = get_relevant_rag(
-                        CHAT_DB_FILE, RAG_INDEX_DIR, st.session_state.current_subject, 
-                        user_p, st.session_state.selected_model, 
-                        ollama_models, openai_models, vector_db="faiss"
+                        CHAT_DB_FILE, 
+                        subject_index_dir, 
+                        search_id, # Using synced ID
+                        user_p, 
+                        st.session_state.selected_model, 
+                        ollama_models, 
+                        openai_models, 
+                        vector_db="faiss"
                     )
 
         # 2. PREDEFINED SYSTEM PROMPT
         if has_docs and rag_content.strip():
+            # Indicator that RAG was successful
+            indicator = "📄 "
             enhanced_p = f"""You are a helpful assistant. Use the following pieces of retrieved context to answer the user's question. 
 
 If the provided context contains the answer, prioritize that information. 
-If the context does not contain the answer, answer the question using your general knowledge normally, without over-emphasizing the lack of context unless specifically asked.
 
 ---
 CONTEXT:
@@ -379,6 +392,7 @@ CONTEXT:
 
 USER QUESTION: {user_p}"""
         else:
+            indicator = ""
             enhanced_p = user_p
 
         # 3. LLM Interaction
@@ -387,13 +401,15 @@ USER QUESTION: {user_p}"""
             images_to_send = [get_b64_image(f.getvalue()) for f in st.session_state.vision_images]
             with message_container.chat_message("assistant", avatar="🤖"):
                 stream_placeholder = st.empty(); full_res = ""
-                for chunk in ollama.chat(model=st.session_state.selected_model, stream=True,
-                                         messages=[{"role": "user", "content": enhanced_p, "images": images_to_send}]):
+                for chunk in ollama.chat(
+                    model=st.session_state.selected_model, 
+                    stream=True,
+                    messages=[{"role": "user", "content": enhanced_p, "images": images_to_send}]
+                ):
                     delta = chunk.get("message", {}).get("content", "")
                     full_res += delta
-                    stream_placeholder.markdown(("📄 " if has_docs else "") + full_res)
+                    stream_placeholder.markdown(indicator + full_res)
                 
-                # Metadata for the Listen button and DB
                 process_assistant_completion(chat_id, full_res, has_docs)
 
         # B. OPENAI MODELS
@@ -414,9 +430,8 @@ USER QUESTION: {user_p}"""
                     if chunk.choices[0].delta.content:
                         delta = chunk.choices[0].delta.content
                         full_res += delta
-                        stream_placeholder.markdown(("📄 " if has_docs else "") + full_res)
+                        stream_placeholder.markdown(indicator + full_res)
                 
-                # Metadata for the Listen button and DB
                 process_assistant_completion(chat_id, full_res, has_docs)
 
 if __name__ == "__main__":
