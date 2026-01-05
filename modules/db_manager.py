@@ -111,14 +111,14 @@ class DBManager:
 
     # ----------------- RAG Document Management -----------------
 
-    def add_rag_doc(self, target_id: str, file_name: str, content: str, vector_data: list = None):
+    def add_rag_doc(self, target_id, file_name, content, vector_data: list = None, metadata=None):
         """
         target_id: In BOTH cases, this is now the subject_name for shared RAG.
         """
         if self.backend == "qdrant":
             return add_rag_doc_qdrant(target_id, file_name, vector_data, content)
         
-        return add_rag_doc_sqlite(self.db_file, target_id, file_name, content)
+        return add_rag_doc_sqlite(self.db_file, target_id, file_name, content, metadata)
 
     def get_subject_documents(self, subject_name: str):
         # Default to SQLite for library listing metadata

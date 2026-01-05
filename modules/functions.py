@@ -57,28 +57,37 @@ def extract_text_from_file(file) -> str:
 
     if name.endswith(".pdf"):
         doc = fitz.open(stream=file.read(), filetype="pdf")
-        for page in doc:
+        for i, page in enumerate(doc, start=1):
             txt = page.get_text("text")
-            if txt: text += txt + "\n"
+            if txt: 
+                # ADDED: Page marker for PDFs
+                text += f"--- Page {i} ---\n{txt}\n"
         doc.close()
+
     elif name.endswith(".docx"):
         doc = DocxDocument(file)
         text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
     elif name.endswith(".pptx"):
         prs = Presentation(file)
         slides_text = []
         for i, slide in enumerate(prs.slides, start=1):
             slide_text = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
-            if slide_text: slides_text.append(f"--- Slide {i} ---\n" + "\n".join(slide_text))
+            # KEEPING: Your existing Slide marker
+            if slide_text: 
+                slides_text.append(f"--- Slide {i} ---\n" + "\n".join(slide_text))
         text = "\n".join(slides_text)
+
     elif name.endswith((".txt", ".md")):
         text = file.read().decode("utf-8", errors="ignore")
+
     elif name.endswith(".csv"):
         try:
             df = pd.read_csv(file)
             text = df.to_string(index=False)
         except Exception as e:
             text = f"Error reading CSV: {e}"
+            
     return text.strip()
 
 # ----------------- TTS & Audio -------------------
@@ -112,37 +121,59 @@ def speak_text(answer: str, openai_client: OpenAI, voice: str = "alloy") -> byte
 # ----------------- RAG with FAISS (Local) -------------------
 
 def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollama_models, openai_models, suffix=""):
-    """
-    Builds a FAISS index inside the subject folder.
-    suffix: 'ollama' or 'openai' to prevent overwriting.
-    """
-    # 1. Clear memory if this index was already loaded
     if target_name in _LOADED_FAISS_INDEXES:
         del _LOADED_FAISS_INDEXES[target_name]
         
-    # 2. Fetch documents from SQLite
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
+    # Pull text and filename from DB
     cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
     rows = cursor.fetchall()
     conn.close()
     
-    if not rows: 
-        print(f"No documents found in DB for {target_name}")
-        return
+    if not rows: return
 
-    # 3. Process Text into Chunks
     all_docs = []
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
+    
     for content, file_name in rows:
-        if content:
-            for chunk in splitter.split_text(content):
-                all_docs.append(Document(page_content=chunk, metadata={"source": file_name}))
+        if not content: continue
+
+        # 1. Base metadata shared by all chunks of this file
+        base_meta = {
+            "source": file_name,
+            "file": file_name,
+            "file_path": os.path.join(subject_dir, "raw", file_name),
+            "type": "pdf_page" if file_name.lower().endswith(".pdf") else "pptx_slide" if file_name.lower().endswith(".pptx") else "text_file"
+        }
+
+        # 2. Use Regex to split by the markers we created in the extraction step
+        # This regex looks for either '--- Slide X ---' or '--- Page X ---'
+        parts = re.split(r"--- (?:Slide|Page) (\d+) ---", content)
+        
+        if len(parts) > 1:
+            # We found markers! 
+            # Parts[0] is text before the first marker.
+            # Then it alternates: Parts[1]=Number, Parts[2]=Text, Parts[3]=Number...
+            for i in range(1, len(parts), 2):
+                num = int(parts[i])
+                page_text = parts[i+1]
+                
+                chunks = splitter.split_text(page_text)
+                for chunk in chunks:
+                    meta = base_meta.copy()
+                    meta["page"] = num    # Add to the metadata list
+                    meta["slide"] = num   # Add to the metadata list
+                    all_docs.append(Document(page_content=chunk, metadata=meta))
+        else:
+            # No markers found (e.g., a .txt or .docx file)
+            chunks = splitter.split_text(content)
+            for chunk in chunks:
+                all_docs.append(Document(page_content=chunk, metadata=base_meta.copy()))
 
     if not all_docs: return
 
-    # 4. Determine Embeddings and Filename
-    # If no suffix is passed, we guess based on model_name
+    # 3. Embeddings & Saving
     if not suffix:
         suffix = "openai" if "gpt" in model_name.lower() else "ollama"
     
@@ -151,13 +182,9 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
     else:
         embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
 
-    # 5. Build and Save Index to modules/subjects/{target_name}/
-    index_name = f"index_{suffix}"
     faiss_index = FAISS.from_documents(all_docs, embeddings)
-    
-    # Save directly into the subject folder
-    faiss_index.save_local(folder_path=subject_dir, index_name=index_name)
-    print(f"✅ Saved {index_name} to {subject_dir}")
+    faiss_index.save_local(folder_path=subject_dir, index_name=f"index_{suffix}")
+    print(f"✅ Rebuilt index_{suffix} with page/slide metadata.")
 
 def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix=""):
     """

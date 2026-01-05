@@ -240,14 +240,21 @@ def main():
             target_sub = st.session_state.current_subject
             subject_path = os.path.join(SUBJECTS_DIR, target_sub)
             
-            with st.spinner(f"Building Universal Knowledge Base for {target_sub}..."):
+            with st.spinner(f"Updating RAG database for {target_sub}..."):
                 # 1. Save files and database text
                 ensure_subject_folders(target_sub)
                 save_uploaded_files(target_sub, st.session_state.uploaded_files_to_process)
                 
                 for f in st.session_state.uploaded_files_to_process:
                     content = extract_text_from_file(f)
-                    db.add_rag_doc(target_id=target_sub, file_name=f.name, content=content)
+                    file_extension = f.name.split('.')[-1].lower()
+                    metadata = {
+                        "file": f.name,
+                        "file_path": os.path.join(subject_path, "raw", f.name),
+                        "type": "pdf_page" if file_extension == "pdf" else "pptx_slide" if file_extension == "pptx" else "text_file",
+                        "subject": target_sub
+                    }
+                    db.add_rag_doc(target_id=target_sub, file_name=f.name, content=content, metadata=metadata)
                 
                 # 2. BUILD OLLAMA-COMPATIBLE INDEX (Nomic)
                 rebuild_rag_index(
@@ -345,6 +352,8 @@ def main():
         subject_index_dir = os.path.join(SUBJECTS_DIR, search_id)
 
         if st.session_state.rag_enabled:
+            current_model = st.session_state.selected_model.lower()
+            suffix = "openai" if "gpt" in current_model else "ollama"
             # Determining which backend to search
             if st.session_state.vector_db == "qdrant" and HAS_QDRANT_HELPER:
                 try:
@@ -372,7 +381,8 @@ def main():
                         st.session_state.selected_model, 
                         ollama_models, 
                         openai_models, 
-                        vector_db="faiss"
+                        vector_db="faiss",
+                        suffix=suffix
                     )
 
         # 2. PREDEFINED SYSTEM PROMPT

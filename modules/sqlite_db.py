@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import os
 import shutil
@@ -55,6 +56,7 @@ def init_db_sqlite(db_file: str):
             subject_name TEXT NOT NULL,
             file_name TEXT,
             content TEXT,
+            metadata TEXT,
             FOREIGN KEY (subject_name) REFERENCES subjects (name) ON DELETE CASCADE
         )
     """)
@@ -122,16 +124,25 @@ def load_chat_sqlite(db_file: str, chat_id):
     conn.close()
     return [{"role": r, "content": c, "used_rag": ur} for r, c, ur in rows], model_name
 
-def add_rag_doc_sqlite(db_file: str, subject_name: str, file_name: str, content: str):
+def add_rag_doc_sqlite(db_file, subject_name, file_name, content, metadata=None):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     try:
+        # 1. Check for duplicates
         cursor.execute("SELECT id FROM rag_docs WHERE subject_name = ? AND file_name = ?", (subject_name, file_name))
-        if cursor.fetchone(): return False, f"{file_name} exists."
-        cursor.execute("INSERT INTO rag_docs (subject_name, file_name, content) VALUES (?, ?, ?)", (subject_name, file_name, content))
+        if cursor.fetchone(): 
+            return False, f"{file_name} exists."    
+        # 2. Convert dictionary to JSON string so SQLite can save it
+        meta_str = json.dumps(metadata) if metadata else "{}"
+        # 3. Insert into the 4 columns
+        cursor.execute(
+            "INSERT INTO rag_docs (subject_name, file_name, content, metadata) VALUES (?, ?, ?, ?)", 
+            (subject_name, file_name, content, meta_str)
+        )
         conn.commit()
         return True, "Success"
-    finally: conn.close()
+    finally: 
+        conn.close()
 
 def get_subject_documents_sqlite(db_file: str, subject_name: str):
     conn = sqlite3.connect(db_file)
