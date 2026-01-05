@@ -159,7 +159,7 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
     faiss_index.save_local(folder_path=subject_dir, index_name=index_name)
     print(f"✅ Saved {index_name} to {subject_dir}")
 
-def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3):
+def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix=""):
     """
     Loads the correct FAISS index (ollama vs openai) from the subject folder.
     """
@@ -288,7 +288,7 @@ def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=No
     elif vector_db == "qdrant":
         rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key)
 
-def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None):     
+def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):     
     if vector_db == "faiss":
         return get_relevant_rag_faiss(db_file, rag_index_dir, target_id, query, model_name, ollama_models, openai_models, top_k)
     elif vector_db == "qdrant":

@@ -35,9 +35,7 @@ except Exception:
 
 load_dotenv()
 CHAT_DB_FILE = "chat_playground.db"
-RAG_INDEX_DIR = "rag_indices"
 SUBJECTS_DIR = os.path.join("modules", "subjects")
-os.makedirs(RAG_INDEX_DIR, exist_ok=True)
 os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
 # ------------------ CONFIG ------------------

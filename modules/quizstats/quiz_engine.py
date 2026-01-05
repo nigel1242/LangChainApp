@@ -99,29 +99,23 @@ def _build_chunks_from_index(subject: str, max_chars: int = 1800) -> List[Dict[s
 
     return chunks
 
-
 # -------------------------------------------------------------
-#   OLLAMA QUESTION GENERATOR
+#   PROMPTS
 # -------------------------------------------------------------
-def _call_ollama_for_chunk(
-    model_name: str,
-    chunk_text: str,
-    subject: str,
-    max_q: int,
-    context_meta: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
-    """Generates quiz questions using a local Ollama model with strict source grounding."""
-
-    system_msg = (
-        "You are a strict academic examiner. Your priority is FACTUAL ACCURACY based ONLY on the provided notes.\n"
-        "1. Identify concepts ONLY found in the <notes>. Do NOT use general knowledge or outside software facts.\n"
-        "2. Create a question and 4 distinct options.\n"
-        "3. VERIFY: Ensure the 'answer_index' correctly matches the correct choice based on the notes.\n"
-        "4. Use LaTeX for math: enclose in $...$ and use double backslashes (\\\\).\n"
+def _get_unified_system_msg():
+    return (
+        "You are a strict academic examiner. Your sole source of truth is the <notes> provided.\n"
+        "1. Identify concepts ONLY found in the <notes>. Do NOT use outside knowledge or general facts.\n"
+        "2. Create a question and exactly 4 distinct options. \n"
+        "3. FORMAT: You MUST prefix each choice with 'A) ', 'B) ', 'C) ', and 'D) '.\n"
+        "4. VERIFY: Ensure the 'answer_index' correctly matches the correct choice (0=A, 1=B, 2=C, 3=D).\n"
+        "5. EXPLANATION: Quote the specific sentence from the notes that supports the answer.\n"
+        "6. Use LaTeX for math: enclose in $...$ and use double backslashes (\\\\).\n"
         "Return valid JSON only."
     )
 
-    user_prompt = f"""
+def _get_unified_user_prompt(max_q, subject, chunk_text):
+    return f"""
 Generate up to {max_q} challenging MCQs from the notes below for the subject: {subject}.
 
 <notes>
@@ -129,9 +123,8 @@ Generate up to {max_q} challenging MCQs from the notes below for the subject: {s
 </notes>
 
 STRICT RULES:
-- Use ONLY the provided notes.
-- Do NOT invent data. For example, if Tableau is not in the notes, do not ask about it.
-- In the 'explanation', quote the specific sentence from the notes that supports the answer.
+- Use ONLY the provided notes. Do NOT invent data.
+- Choices MUST be formatted as: ["A) text", "B) text", "C) text", "D) text"]
 - Ensure 'answer_index' (0-3) is 100% accurate.
 
 JSON format:
@@ -139,9 +132,9 @@ JSON format:
   "questions": [
     {{
       "question": "text",
-      "choices": ["A", "B", "C", "D"],
+      "choices": ["A) ...", "B) ...", "C) ...", "D) ..."],
       "answer_index": 0,
-      "explanation": "Fact Check: According to the notes, [Quote/Explanation]...",
+      "explanation": "Fact Check: According to the notes, [Quote]...",
       "needs_image": false,
       "image_hint": "",
       "difficulty": "medium",
@@ -151,92 +144,47 @@ JSON format:
 }}
 """
 
+# -------------------------------------------------------------
+#   OLLAMA QUESTION GENERATOR
+# -------------------------------------------------------------
+def _call_ollama_for_chunk(model_name, chunk_text, subject, max_q, context_meta=None):
     try:
         response = ollama.chat(
             model=model_name,
             messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": _get_unified_system_msg()},
+                {"role": "user", "content": _get_unified_user_prompt(max_q, subject, chunk_text)},
             ],
-            options={
-                "temperature": 0.1,  # Lowered for higher strictness
-                "num_predict": 4096,
-            },
+            options={"temperature": 0.1, "num_predict": 4096},
             format="json",
         )
         raw = response["message"]["content"]
     except Exception as e:
         print(f"[quiz_engine] Ollama error ({model_name}):", e)
         return []
-
-    return _parse_raw_quiz_json(raw, chunk_text, context_meta) 
+    return _parse_raw_quiz_json(raw, chunk_text, context_meta)
 
 # -------------------------------------------------------------
 #   OPENAI QUESTION GENERATOR
 # -------------------------------------------------------------
-def _call_openai_for_chunk(
-    model_name: str,
-    chunk_text: str,
-    subject: str,
-    max_q: int,
-    context_meta: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
-    """Generates quiz questions using OpenAI with high-fidelity checks."""
-
+def _call_openai_for_chunk(model_name, chunk_text, subject, max_q, context_meta=None):
     client = _get_openai_client()
     if client is None: return []
-
-    system_msg = (
-        "You are a strict academic examiner. Your sole source of truth is the <notes> provided.\n"
-        "1. Do NOT use outside knowledge (e.g., general software facts) unless explicitly mentioned in the notes.\n"
-        "2. If the notes discuss 'Measure Names' in Tableau, use that. If they don't, do not invent the question.\n"
-        "3. Every question must have a 'Verified' explanation that quotes or paraphrases the notes."
-    )
-
-    user_prompt = f"""
-Generate up to {max_q} MCQs from these notes.
-
-<notes>
-{chunk_text}
-</notes>
-
-MANDATORY CHECKS:
-1. Is the question testing a specific concept?
-2. Does the 'answer_index' (0-3) actually point to the correct answer?
-3. In the explanation, explicitly state: 'Fact check: [Concept] is defined as [Definition].'
-
-Return JSON ONLY:
-{{
-  "questions": [
-    {{
-      "question": "...",
-      "choices": ["...", "...", "...", "..."],
-      "answer_index": 0,
-      "explanation": "...",
-      "needs_image": false,
-      "image_hint": "",
-      "difficulty": "hard",
-      "topic": "..."
-    }}
-  ]
-}}
-"""
 
     try:
         resp = client.chat.completions.create(
             model=model_name,
-            temperature=0.35,
+            temperature=0.1, # Set to match Ollama's strictness
             messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": _get_unified_system_msg()},
+                {"role": "user", "content": _get_unified_user_prompt(max_q, subject, chunk_text)},
             ],
-            # Note: OpenAI's client handles JSON response formatting separately from chat completions
+            response_format={"type": "json_object"} # Forces JSON mode for OpenAI
         )
         raw = resp.choices[0].message.content or ""
     except Exception as e:
         print("[quiz_engine] OpenAI error:", e)
         return []
-
     return _parse_raw_quiz_json(raw, chunk_text, context_meta)
 
 
@@ -460,68 +408,67 @@ def build_quiz_from_corpus(
 
     return quiz
 
-def build_quiz_from_rag(
-    subject: str,
-    model_name: str,
-    n_questions: int = 10,
-    vector_db: str = "faiss"
-) -> List[Dict[str, Any]]:
+def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: str = "faiss") -> List[Dict[str, Any]]:
     from modules.functions import get_relevant_rag
+    import os
     import random
 
-    # 1. PATH LOGIC: Try both 'Dava' and 'subject_Dava'
-    possible_ids = [f"subject_{subject}", subject]
-    rag_content = ""
-    has_docs = False
+    # 1. NEW PATH LOGIC: Point directly to the subject folder
+    subject_dir = os.path.join("modules", "subjects", subject)
+    
+    # 2. SUFFIX LOGIC: Match the index naming convention
+    is_openai = "gpt" in model_name.lower()
+    suffix = "openai" if is_openai else "ollama"
 
-    # Dispatcher setup
+    # Setup model lists for the dispatcher
     try:
+        import ollama
         raw_ollama = [m["model"] for m in ollama.list().get("models", [])]
         ollama_models = tuple(raw_ollama)
     except:
         ollama_models = ()
     openai_models = ("gpt-4o-mini", "gpt-4o", "gpt-4")
 
-    # 2. RETRIEVAL LOOP: Find which folder actually exists
-    for tid in possible_ids:
-        content, found = get_relevant_rag(
-            db_file="chat_playground.db",
-            rag_index_dir="rag_indices",
-            target_id=tid,
-            query=f"Overview of {subject}",
-            model_name=model_name,
-            ollama_models=ollama_models,
-            openai_models=openai_models,
-            top_k=15,
-            vector_db=vector_db
-        )
-        if found and content.strip():
-            rag_content = content
-            has_docs = True
-            break # Found the folder!
+    # 3. RETRIEVAL: Using the updated directory and suffix
+    # Note: Added 'suffix' parameter to match your functions.py logic
+    rag_content, has_docs = get_relevant_rag(
+        db_file="chat_playground.db",
+        rag_index_dir=subject_dir, # Looking in modules/subjects/Dava/
+        target_id=subject,
+        query=f"Generate quiz questions about {subject}",
+        model_name=model_name,
+        ollama_models=ollama_models,
+        openai_models=openai_models,
+        top_k=15,
+        vector_db=vector_db,
+        suffix=suffix # This ensures it opens index_ollama or index_openai
+    )
 
-    if not has_docs:
-        print(f"[quiz_engine] Critical: No FAISS index found for {subject}")
+    if not has_docs or not rag_content.strip():
+        print(f"[quiz_engine] Critical: No {suffix} index found for {subject} at {subject_dir}")
         return []
 
-    # 3. GENERATION
-    is_openai = "gpt" in model_name.lower()
+    # 4. GENERATION
     call_fn = _call_openai_for_chunk if is_openai else _call_ollama_for_chunk
     
+    # Split the retrieved text into manageable pieces for the LLM
     chunks = _split_corpus_into_chunks(rag_content)
     random.shuffle(chunks)
     quiz = []
 
     for chunk in chunks:
-        if len(quiz) >= n_questions: break
+        if len(quiz) >= n_questions: 
+            break
         
         try:
-            qs = call_fn(model_name, chunk, subject, max_q=1, context_meta=None)
+            # Generate 1-2 questions per chunk to ensure variety
+            qs = call_fn(model_name, chunk, subject, max_q=2) 
             for q in qs:
+                # Basic duplicate prevention
                 if all(q["question"] != e["question"] for e in quiz):
                     quiz.append(q)
         except Exception as e:
-            print(f"LLM Error: {e}")
+            print(f"LLM Generation Error for chunk: {e}")
             continue
 
-    return quiz
+    return quiz[:n_questions]
