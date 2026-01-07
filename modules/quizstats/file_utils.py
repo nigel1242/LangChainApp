@@ -14,7 +14,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pptx import Presentation
 import pandas as pd
-import win32com
+import win32com.client
 import pythoncom
 from langchain_core.documents import Document
 
