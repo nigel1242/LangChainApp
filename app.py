@@ -24,7 +24,7 @@ from modules.functions import (
 )
 from modules.login import check_authentication, login_page, logout
 from modules.quizstats.subject_store import ensure_subject_folders
-from modules.quizstats.file_utils import save_uploaded_files
+from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, save_uploaded_files
 
 try:
     from modules.qdrant_db import search_rag_docs_qdrant
@@ -241,29 +241,51 @@ def main():
             subject_path = os.path.join(SUBJECTS_DIR, target_sub)
             
             with st.spinner(f"Updating RAG database for {target_sub}..."):
-                # 1. Save files and database text
                 ensure_subject_folders(target_sub)
-                save_uploaded_files(target_sub, st.session_state.uploaded_files_to_process)
                 
                 for f in st.session_state.uploaded_files_to_process:
-                    content = extract_text_from_file(f)
-                    file_extension = f.name.split('.')[-1].lower()
+                    f.seek(0) # Reset pointer
+                    
+                    # 1. Save original file temporarily
+                    save_uploaded_files(target_sub, [f])
+                    original_path = os.path.join("modules", "subjects", target_sub, "raw", f.name)
+                    
+                    ext = f.name.split('.')[-1].lower()
+                    final_path = original_path
+
+                    # 2. Convert PPTX/DOCX to PDF and Cleanup
+                    if ext in ["pptx", "docx"]:
+                        with st.spinner(f"Converting {f.name} to visual PDF..."):
+                            from modules.quizstats.file_utils import convert_to_pdf
+                            pdf_path = convert_to_pdf(original_path)
+                            
+                            if pdf_path and pdf_path != original_path:
+                                final_path = pdf_path
+                                # DELETE ORIGINAL OFFICE FILE
+                                try:
+                                    os.remove(original_path)
+                                except Exception as e:
+                                    print(f"Cleanup error: {e}")
+                    
+                    # 3. Standardized Text Extraction from the DISK PATH
+                    content = extract_text_from_path(final_path)
+                    
+                    # 4. Save metadata (always pointing to the PDF version)
+                    final_filename = os.path.basename(final_path)
                     metadata = {
-                        "file": f.name,
-                        "file_path": os.path.join(subject_path, "raw", f.name),
-                        "type": "pdf_page" if file_extension == "pdf" else "pptx_slide" if file_extension == "pptx" else "text_file",
+                        "file": final_filename,
+                        "type": "pdf_page",
                         "subject": target_sub
                     }
-                    db.add_rag_doc(target_id=target_sub, file_name=f.name, content=content, metadata=metadata)
+                    db.add_rag_doc(target_id=target_sub, file_name=final_filename, content=content, metadata=metadata)
                 
-                # 2. BUILD OLLAMA-COMPATIBLE INDEX (Nomic)
+                # 5. REBUILD INDICES
                 rebuild_rag_index(
                     CHAT_DB_FILE, subject_path, target_sub, 
                     "llama3:8b", ollama_models, openai_models, 
                     suffix="ollama" 
                 )
                 
-                # 3. BUILD OPENAI-COMPATIBLE INDEX (GPT)
                 if st.session_state.openai_api_key:
                     os.environ["OPENAI_API_KEY"] = st.session_state.openai_api_key
                     rebuild_rag_index(
@@ -272,7 +294,7 @@ def main():
                         suffix="openai"
                     )
                 
-                st.success(f"✅ Success! {target_sub} is now portable and multi-model ready.")
+                st.success(f"✅ Success! {target_sub} is now standardized to PDF.")
                 st.session_state.uploaded_files_to_process = []
                 st.rerun()
 
