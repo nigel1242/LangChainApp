@@ -33,7 +33,7 @@ os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
 # Initialize DBManager
 db = DBManager(
-    backend=st.session_state.get("chat_backend", "sqlite"),
+    backend=st.session_state.get("sqlite"),
     db_file=CHAT_DB_FILE,
 )
 
@@ -120,7 +120,6 @@ with st.sidebar:
     st.markdown(f"**User: {username}**")
     if st.button("Logout"): logout(); st.rerun()
     st.markdown("---")
-    st.info(f"Active Subject: {S['selected_subject']}")
 
 # ---------- FILE PROCESSING (PDF-FIRST) ----------
 with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
