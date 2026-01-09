@@ -17,7 +17,7 @@ print("Collections in Qdrant:", [c.name for c in collections])
 # Check rag_docs_* collections
 for col in collections:
     if col.name.startswith(DOC_COLLECTION_PREFIX):
-        points, _ = client.scroll(collection_name=col.name, limit=5)
+        points, _ = client.scroll(collection_name=col.name, limit=5, with_vectors=True)
         print(f"\nCollection: {col.name}")
         for p in points:
             print("ID:", p.id)
