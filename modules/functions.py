@@ -269,36 +269,43 @@ def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollam
         pass
 
 def get_relevant_rag_qdrant(db_file, qdrant_url, target_id, query, model_name, ollama_models, openai_models, top_k=3, qdrant_api_key=None):
-    if model_name in ollama_models:
-        embeddings = OllamaEmbeddings("nomic-embed-text:v1.5")
-    else:
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
-    
-    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
-    query_vector = embeddings.embed_query(query)
-    
-    # Correct Naming Convention: rag_docs_<vector_size>
-    collection_name = f"rag_docs_{len(query_vector)}" 
+    print(f"\n>>> [TERMINAL DEBUG] Starting Qdrant Search")
+    print(f">>> Subject: '{target_id}' | Model: {model_name}")
 
+    if model_name in openai_models or "gpt" in model_name.lower():
+        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.get("openai_api_key"))
+    else:
+        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+    
     try:
+        query_vector = embeddings.embed_query(query)
+        collection_name = f"rag_docs_{len(query_vector)}" 
+        print(f">>> Generated Vector Dim: {len(query_vector)} | Targeting: {collection_name}")
+
+        client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
+        
         response = client.query_points(
             collection_name=collection_name,
             query=query_vector,
             query_filter=qmodels.Filter(
-                must=[qmodels.FieldCondition(key="subject_name", match=qmodels.MatchValue(value=target_id))]
+                must=[qmodels.FieldCondition(key="subject_name", match=qmodels.MatchValue(value=str(target_id).strip()))]
             ),
             limit=top_k,
             with_payload=True
         )
         
-        if not response.points: return "", False
+        print(f">>> Qdrant returned {len(response.points)} points")
+        
+        if not response.points:
+            return "", [], False
 
-        context = "\n\n".join(f"Source: {p.payload.get('file_name')}\n{p.payload.get('content')}" for p in response.points)
-        return context, True
+        context = "\n\n".join([p.payload.get('content', '') for p in response.points])
+        return context, response.points, True
+
     except Exception as e:
-        print(f"Qdrant RAG Error: {e}")
-        return "", False
-
+        print(f">>> [TERMINAL ERROR] {e}")
+        return "", [], False
+    
 # ----------------- Chat Title Generation -------------------
 
 def generate_chat_title(first_message: str, model_name: str, openai_client=None) -> str:
@@ -328,7 +335,7 @@ def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=No
     elif vector_db == "qdrant":
         rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key)
 
-def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):    
+def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):
     if vector_db == "faiss":
         return get_relevant_rag_faiss(db_file, rag_index_dir, target_id, query, model_name, ollama_models, openai_models, top_k, suffix)
     elif vector_db == "qdrant":
