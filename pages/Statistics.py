@@ -4,10 +4,10 @@ from __future__ import annotations
 from datetime import datetime
 import pandas as pd
 import streamlit as st
+import os
 
 # --- Local Module Imports ---
 from modules.db_manager import DBManager
-from modules.quizstats.subject_store import list_subjects
 from modules.quizstats.progress_store import (
     init_stats_db,
     list_subjects_with_stats,
@@ -18,17 +18,16 @@ from modules.quizstats.progress_store import (
 # ------------------ CONFIGURATION ------------------
 st.set_page_config(page_title="Progress Statistics", page_icon="📊", layout="wide")
 QUESTIONS_PER_ATTEMPT = 10  # 1 attempt is defined as 10 questions
+CHAT_DB_FILE = "chat_playground.db"
 
 def init_page():
     """Initializes databases and backend managers."""
     init_stats_db()
     
-    # Initialize DBManager to match app.py (handles SQLite or Qdrant)
+    # Explicitly set to "sqlite" to match Quiz.py and prevent NoneType errors
     return DBManager(
-        backend=st.session_state.get("chat_backend", "sqlite"),
-        db_file="chat_playground.db",
-        qdrant_url=st.session_state.get("qdrant_url"),
-        qdrant_api_key=st.session_state.get("qdrant_api_key"),
+        backend="sqlite",
+        db_file=CHAT_DB_FILE,
     )
 
 db = init_page()
@@ -36,22 +35,25 @@ db = init_page()
 # ------------------ SUBJECT SELECTION ------------------
 st.title("📊 Progress & Statistics")
 
-# Combine subjects from the Library and those with existing stats
-library_subjects = db.load_all_subjects()
-stats_subjects = list_subjects_with_stats()
-combined_options = sorted(list(set(library_subjects + stats_subjects)))
+# --- MATCHED LOGIC FROM QUIZ.PY ---
+# Load only active subjects from the library
+subject_names = db.load_all_subjects()
 
-if not combined_options:
-    st.info("No quiz attempts or subjects found. Go take a quiz first!")
-    st.stop()
+# Fix: Ensure subject_names is an iterable list to avoid "NoneType" error
+if subject_names is None:
+    subject_names = []
 
-# Use shared session state for subject selection consistency
-current_default = st.session_state.get("current_subject", combined_options[0])
+# Fallback: If no subjects exist in DB, provide "General" to prevent selectbox crash
+if not subject_names:
+    subject_names = ["General"]
+
+# Get current default from session state
+current_default = st.session_state.get("current_subject", subject_names[0])
 
 selected_subject = st.selectbox(
     "📚 Select Subject to Analyze",
-    combined_options,
-    index=combined_options.index(current_default) if current_default in combined_options else 0
+    subject_names,
+    index=subject_names.index(current_default) if current_default in subject_names else 0
 )
 
 # Sync subject across pages
@@ -60,6 +62,7 @@ if selected_subject != st.session_state.get("current_subject"):
     st.rerun()
 
 # ------------------ DATA RETRIEVAL ------------------
+# Get quiz attempts from quiz_stats.db
 attempts = get_attempts_for_subject(selected_subject)
 
 if not attempts:
@@ -68,7 +71,7 @@ if not attempts:
 
 # ------------------ RESET UTILITY ------------------
 with st.expander("⚠️ Danger Zone"):
-    if st.button(f"🗑️ Reset all data for {selected_subject}"):
+    if st.button(f"🗑️ Reset all statistics for {selected_subject}"):
         clear_subject_stats(selected_subject)
         st.success(f"Cleared all statistics for {selected_subject}.")
         st.rerun()
@@ -128,11 +131,9 @@ with ctrl1:
     chosen_id = st.selectbox("View Attempt #", options=available_ids, index=len(available_ids)-1)
 
 # ------------------ METRICS DASHBOARD ------------------
-# Scope data based on visibility toggle
 df_scope = df if show_inc else df[df["attempt_id"].isin(complete_ids)]
 att_df = df[df["attempt_id"] == chosen_id]
 
-# Calculate stats
 total_q, total_correct = len(df_scope), int(df_scope["correct_bool"].sum())
 att_q, att_correct = len(att_df), int(att_df["correct_bool"].sum())
 
