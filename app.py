@@ -185,7 +185,13 @@ def main():
                     clear_tts(); st.rerun()
             with col2:
                 if st.button("✕", key=f"del_{chat_id}"):
-                    db.delete_chat(chat_id); st.rerun()
+                    db.delete_chat(chat_id)
+                    if st.session_state.get("current_chat_id") == chat_id:
+                        st.session_state.messages = []
+                        st.session_state.current_chat_id = None
+                        st.session_state.last_assistant_text = ""
+                        clear_tts()
+                    st.rerun()
 
     # ---------------- MODELS ----------------
     MODEL_MAP = {
