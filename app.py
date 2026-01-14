@@ -141,6 +141,16 @@ def main():
                 st.session_state.messages = []
                 st.rerun()
 
+        if selected_sub != "General":  # Prevent deleting the default subject
+                if st.button(f"Delete {selected_sub}", type="secondary"):
+                    db.delete_subject(selected_sub, rag_index_dir=SUBJECTS_DIR)
+                    st.session_state.current_subject = "General"
+                    st.session_state.current_chat_id = None
+                    st.session_state.messages = []
+                    
+                    st.success(f"Subject '{selected_sub}' deleted.")
+                    st.rerun()
+
         st.markdown("---")
         backend_choice = st.selectbox(
             "Select Backend", 
