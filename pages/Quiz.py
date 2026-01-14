@@ -33,7 +33,7 @@ os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
 # Initialize DBManager
 db = DBManager(
-    backend=st.session_state.get("sqlite"),
+    backend="sqlite",
     db_file=CHAT_DB_FILE,
 )
 
