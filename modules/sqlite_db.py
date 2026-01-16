@@ -3,6 +3,8 @@ import sqlite3
 import os
 import shutil
 
+from modules.quizstats.progress_store import clear_subject_stats
+
 def init_db_sqlite(db_file: str):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -177,6 +179,10 @@ def delete_subject_sqlite(db_file: str, subject_name: str, rag_index_dir: str = 
         conn.commit()
     finally:
         conn.close()
+    try:
+        clear_subject_stats(subject_name)
+    except Exception as e:
+        print(f"Error clearing statistics for {subject_name}: {e}")
 
     if rag_index_dir:
         path = os.path.join(rag_index_dir, subject_name) 
