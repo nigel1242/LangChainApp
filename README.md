@@ -24,32 +24,3 @@ Just enter your API key in the sidebar and select one of the GPT models.
 3. Install requirements using "pip install -r requirements.txt"
 4. Create .env file in project folder and copy paste the keys
 5. Run app using "streamlit run app.py"
-
-Quiz.py error: NOT FIXED 17/12
-Sometimes showing hint will get this error
-TypeError: join() argument must be str, bytes, or os.PathLike object, not 'NoneType'
-
-File "C:\Users\kunji\Downloads\LangChainApp\venv\Lib\site-packages\streamlit\runtime\scriptrunner\exec_code.py", line 129, in exec_func_with_error_handling
-    result = func()
-             ^^^^^^
-File "C:\Users\kunji\Downloads\LangChainApp\venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 667, in code_to_exec
-    _mpa_v1(self._main_script_path)
-File "C:\Users\kunji\Downloads\LangChainApp\venv\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 165, in _mpa_v1
-    page.run()
-File "C:\Users\kunji\Downloads\LangChainApp\venv\Lib\site-packages\streamlit\navigation\page.py", line 303, in run
-    exec(code, module.__dict__)  # noqa: S102
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "C:\Users\kunji\Downloads\LangChainApp\pages\Quiz.py", line 217, in <module>
-    entry = find_relevant_context_for_text(S["selected_subject"], img_query)
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "C:\Users\kunji\Downloads\LangChainApp\modules\quizstats\file_utils.py", line 463, in find_relevant_context_for_text
-    idx = _load_subject_index(subject_name)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "C:\Users\kunji\Downloads\LangChainApp\modules\quizstats\file_utils.py", line 413, in _load_subject_index
-    root = ensure_subject_folders(subject_name)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "C:\Users\kunji\Downloads\LangChainApp\modules\quizstats\file_utils.py", line 40, in ensure_subject_folders
-    root = os.path.join(SUBJECTS_DIR, subject_name)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-File "<frozen ntpath>", line 143, in join
-File "<frozen genericpath>", line 152, in _check_arg_types
