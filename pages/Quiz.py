@@ -27,7 +27,7 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).parents[1]
 CHAT_DB_FILE = str(BASE_DIR / "chat_playground.db")
-SUBJECTS_DIR = os.path.join("modules", "subjects") # Unified pathing
+SUBJECTS_DIR = os.path.join("modules", "subjects") 
 
 os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
@@ -50,7 +50,7 @@ if "quiz_state" not in st.session_state:
         "quiz": [],
         "current_idx": 0,
         "score": 0,
-        "submitted": {},
+        "submitted": {}, # Stores {question_index: True}
     }
 
 S = st.session_state.quiz_state
@@ -113,7 +113,7 @@ index_path = os.path.join(subject_folder, f"index_{suffix}.faiss")
 if os.path.exists(index_path):
     st.success(f"✅ {suffix.upper()} Index found. Ready to generate.")
 else:
-    st.error(f"⚠️ Index missing. Please 'Process & Sync' in the Knowledge Base below.")
+    st.error(f"⚠️ Index missing. Please upload files and click 'Process RAG' below.")
 
 # ---------- SIDEBAR ----------
 with st.sidebar:
@@ -129,45 +129,35 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
         accept_multiple_files=True
     )
     
-    if st.button("📂 Process & Sync RAG"):
+    if st.button("📂 Process RAG"):
         target_sub = S["selected_subject"]
         subject_path = os.path.join(SUBJECTS_DIR, target_sub)
         
         with st.spinner(f"Processing and converting for {suffix.upper()}..."):
-            # 1. Create folders if missing
             ensure_subject_folders(target_sub)
             
             if uploaded:
-                # 2. Save uploaded files to the raw folder
                 save_uploaded_files(target_sub, uploaded)
                 
                 for f in uploaded:
-                    f.seek(0) # Prevent EmptyFileError
-                    
-                    # Construct paths for processing
+                    f.seek(0) 
                     orig_path = os.path.join(SUBJECTS_DIR, target_sub, "raw", f.name)
                     ext = f.name.split('.')[-1].lower()
                     final_path = orig_path
 
-                    # 3. Conversion and Cleanup Phase
                     if ext in ["pptx", "docx"]:
-                        with st.spinner(f"Converting {f.name} to visual PDF..."):
-                            from modules.quizstats.file_utils import convert_to_pdf
-                            pdf_path = convert_to_pdf(orig_path)
-                            
-                            if pdf_path and pdf_path != orig_path:
-                                final_path = pdf_path
-                                # DELETE THE ORIGINAL OFFICE FILE
-                                try:
-                                    os.remove(orig_path)
-                                except Exception as e:
-                                    print(f"Cleanup error for {f.name}: {e}")
+                        from modules.quizstats.file_utils import convert_to_pdf
+                        pdf_path = convert_to_pdf(orig_path)
+                        if pdf_path and pdf_path != orig_path:
+                            final_path = pdf_path
+                            try:
+                                os.remove(orig_path)
+                            except Exception as e:
+                                print(f"Cleanup error for {f.name}: {e}")
                     
-                    # 4. Standardized Text Extraction from the PDF path
                     from modules.quizstats.file_utils import extract_text_from_path
                     content = extract_text_from_path(final_path)
                     
-                    # 5. Add to RAG Database pointing only to the PDF
                     final_filename = os.path.basename(final_path)
                     metadata = {
                         "file": final_filename,
@@ -176,7 +166,6 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
                     }
                     db.add_rag_doc(target_sub, final_filename, content, metadata=metadata)
             
-            # 6. Build the index DIRECTLY in the subject folder
             rebuild_rag_index(
                 CHAT_DB_FILE, 
                 subject_folder, 
@@ -211,67 +200,81 @@ if st.button("🎲 Generate 10 Questions"):
 # ---------- QUIZ PLAYER ----------
 if S["quiz"]:
     st.divider()
-    q_idx = S["current_idx"]
-    q = S["quiz"][q_idx]
-
-    st.subheader(f"Question {q_idx + 1}")
-
-    # ---------- RELEVANT CONTEXT (STANDARDIZED PDF VIEW) ----------
-    with st.expander(f"🔍 Show Relevant Context", expanded=False):
-        meta = q.get("context_meta", {})
-        f_name = meta.get("file")
-        page_num = meta.get("page", 1)
-        
-        # Path reconstruction: Standardized to 'raw' folder
-        pdf_path = os.path.join(SUBJECTS_DIR, S["selected_subject"], "raw", f_name)
-
-        if f_name and os.path.exists(pdf_path):
-            # Standardized PDF rendering logic 
-            img = render_pdf_page_image(pdf_path, page_num)
-            if img:
-                st.image(img, caption=f"Source: {f_name} | Page {page_num}", width="stretch")
-            else:
-                st.warning("Rendering failed for this page.")
-        else:
-            st.error("Original source PDF not found.")
-            st.write(q.get("explanation", "No additional context available."))
-
-    st.markdown(f"### {q['question']}")
     
-    # Quiz options
-    picked = st.radio("Choose one:", q["choices"], index=None, key=f"q_{q_idx}")
+    # Check if we have finished all questions
+    if S["current_idx"] >= len(S["quiz"]):
+        # --- FINISHED PAGE ---
+        st.success("🎉 Quiz Finished!")
+        st.header(f"Final Score: {S['score']} / {len(S['quiz'])}")
+    else:
+        # --- ACTIVE QUIZ ---
+        q_idx = S["current_idx"]
+        q = S["quiz"][q_idx]
+        has_submitted = S["submitted"].get(q_idx, False)
 
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        if st.button("Submit"):
-            if picked:
-                is_correct = (q["choices"].index(picked) == q["answer_idx"])
-                S["submitted"][q_idx] = True
-                if is_correct:
-                    S["score"] += 1
-                    st.success("Correct!")
+        st.subheader(f"Question {q_idx + 1}")
+
+        with st.expander(f"🔍 Show Relevant Context", expanded=False):
+            meta = q.get("context_meta", {})
+            f_name = meta.get("file")
+            page_num = meta.get("page", 1)
+            pdf_path = os.path.join(SUBJECTS_DIR, S["selected_subject"], "raw", f_name)
+
+            if f_name and os.path.exists(pdf_path):
+                img = render_pdf_page_image(pdf_path, page_num)
+                if img:
+                    st.image(img, caption=f"Source: {f_name} | Page {page_num}", use_container_width=True)
                 else:
-                    st.error(f"Incorrect. Correct answer: {q['choices'][q['answer_idx']]}")
-                
-                record_attempt(
-                    subject=S["selected_subject"], 
-                    question=q["question"],
-                    chosen=picked, 
-                    correct=q["choices"][q["answer_idx"]],
-                    is_correct=1 if is_correct else 0, 
-                    topic=q.get("topic", "General")
-                )
+                    st.warning("Rendering failed for this page.")
             else:
-                st.warning("Please select an option.")
+                st.error("Original source PDF not found.")
+                st.write(q.get("explanation", "No additional context available."))
 
-    with col2:
-        if st.button("Next") and S["submitted"].get(q_idx):
-            if S["current_idx"] < len(S["quiz"]) - 1:
+        st.markdown(f"### {q['question']}")
+        
+        picked = st.radio(
+            "Choose one:", 
+            q["choices"], 
+            index=None if not has_submitted else q["choices"].index(st.session_state.get(f"q_{q_idx}")),
+            key=f"q_{q_idx}",
+            disabled=has_submitted
+        )
+
+        col1, col2, col3 = st.columns([1, 1, 2])
+        
+        with col1:
+            if st.button("Submit", disabled=has_submitted):
+                if picked:
+                    is_correct = (q["choices"].index(picked) == q["answer_idx"])
+                    S["submitted"][q_idx] = True
+                    if is_correct:
+                        S["score"] += 1
+                    
+                    record_attempt(
+                        subject=S["selected_subject"], 
+                        question=q["question"],
+                        chosen=picked, 
+                        correct=q["choices"][q["answer_idx"]],
+                        is_correct=1 if is_correct else 0, 
+                        topic=q.get("topic", "General")
+                    )
+                    st.rerun()
+                else:
+                    st.warning("Please select an option.")
+
+        if has_submitted:
+            is_correct = (q["choices"].index(st.session_state.get(f"q_{q_idx}")) == q["answer_idx"])
+            if is_correct:
+                st.success("✨ Correct!")
+            else:
+                st.error(f"❌ Incorrect. Correct answer: {q['choices'][q['answer_idx']]}")
+
+        with col2:
+            # Change label to 'Finish' on the last question
+            label = "Finish" if q_idx == len(S["quiz"]) - 1 else "Next"
+            if st.button(label) and has_submitted:
                 S["current_idx"] += 1
                 st.rerun()
-            else:
-                st.balloons()
-                st.success(f"Quiz Complete! Final Score: {S['score']} / {len(S['quiz'])}")
-    
-    with col3:
-        st.metric("Progress", f"{S['current_idx'] + 1} / {len(S['quiz'])}", f"Score: {S['score']}")
+        
+        with col3:
+            st.metric("Progress", f"{q_idx + 1} / {len(S['quiz'])}", f"Score: {S['score']}")

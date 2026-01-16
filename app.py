@@ -233,7 +233,7 @@ def main():
         if uploaded:
             st.session_state.uploaded_files_to_process = uploaded
 
-        if st.button("📂 Process & Sync RAG"):
+        if st.button("📂 Process RAG"):
                 target_sub = st.session_state.current_subject
                 subject_path = os.path.join(SUBJECTS_DIR, target_sub)
                 
@@ -241,7 +241,7 @@ def main():
                 from langchain_text_splitters import RecursiveCharacterTextSplitter
                 qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
                 
-                with st.spinner(f"Updating Knowledge Base..."):
+                with st.spinner(f"Processing RAG"):
                     ensure_subject_folders(target_sub)
                     for f in st.session_state.uploaded_files_to_process:
                         f.seek(0)
@@ -252,12 +252,11 @@ def main():
                         final_path = original_path
 
                         if ext in ["pptx", "docx"]:
-                            with st.spinner(f"Converting {f.name}..."):
-                                pdf_path = convert_to_pdf(original_path)
-                                if pdf_path and pdf_path != original_path:
-                                    final_path = pdf_path
-                                    try: os.remove(original_path)
-                                    except: pass
+                            pdf_path = convert_to_pdf(original_path)
+                            if pdf_path and pdf_path != original_path:
+                                final_path = pdf_path
+                                try: os.remove(original_path)
+                                except: pass
                         
                         content = extract_text_from_path(final_path)
                         final_filename = os.path.basename(final_path)
