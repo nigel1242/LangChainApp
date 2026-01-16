@@ -76,7 +76,7 @@ available_models = ollama_models + openai_models
 display_models = [MODEL_MAP.get(m, m) for m in available_models]
 
 if not available_models:
-    st.warning("⚠️ No supported models found. Check Ollama or OpenAI Key.")
+    st.warning("⚠️ No supported models found. Please visit settings page.")
     st.stop()
 
 # Model Selector

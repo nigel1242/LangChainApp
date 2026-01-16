@@ -212,7 +212,7 @@ def main():
     display_models = [MODEL_MAP.get(m, m) for m in available_technical]
 
     if not available_technical:
-        st.warning("⚠️ No supported models found.")
+        st.warning("⚠️ No supported models found. Please visit settings page.")
         st.stop()
 
     m_idx = 0
