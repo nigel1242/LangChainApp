@@ -69,12 +69,36 @@ def main():
             new_qdrant_key = st.text_input("Qdrant API Key", value=current_qdrant_key, type="password")
 
         if st.button("💾 Save API Credentials", type="primary"):
-            update_env_key("OPENAI_API_KEY", new_openai)
-            update_env_key("QDRANT_URL", new_qdrant_url)
-            update_env_key("QDRANT_API_KEY", new_qdrant_key)
-            st.success("Credentials saved!")
-            sleep(1)
-            st.rerun()
+            error_found = False
+            
+            # 1. TEST QDRANT (if values provided)
+            if new_qdrant_url and new_qdrant_key:
+                try:
+                    from qdrant_client import QdrantClient
+                    test_q = QdrantClient(url=new_qdrant_url, api_key=new_qdrant_key, timeout=3)
+                    test_q.get_collections()
+                except Exception as e:
+                    st.error(f"Qdrant Connection Failed: {e}")
+                    error_found = True
+
+            # 2. TEST OPENAI (if value provided)
+            if new_openai:
+                try:
+                    from openai import OpenAI
+                    test_oa = OpenAI(api_key=new_openai)
+                    test_oa.models.list()
+                except Exception as e:
+                    st.error(f"OpenAI Key Invalid: {e}")
+                    error_found = True
+
+            # 3. SAVE ONLY IF PASSED (or if fields were cleared intentionally)
+            if not error_found:
+                update_env_key("OPENAI_API_KEY", new_openai)
+                update_env_key("QDRANT_URL", new_qdrant_url)
+                update_env_key("QDRANT_API_KEY", new_qdrant_key)
+                st.success("Credentials validated and saved!")
+                sleep(1)
+                st.rerun()
 
     st.divider()
 

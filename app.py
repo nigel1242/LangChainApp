@@ -49,6 +49,7 @@ def get_openai_client() -> OpenAI:
         raise RuntimeError("OpenAI API key missing. Set it in the sidebar.")
     return OpenAI(api_key=api_key)
 
+
 def main():
     def process_assistant_completion(chat_id, full_res, used_rag):
         """Saves completion to DB and prepares TTS metadata."""
@@ -97,13 +98,65 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = val
 
+    # --------- Lock ---------
+    q_url = os.getenv("QDRANT_URL", "").strip()
+    q_key = os.getenv("QDRANT_API_KEY", "").strip()
+    oa_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "").strip()
+
+    using_qdrant = st.session_state.get("vector_db") == "qdrant"
+    lock_ui = False
+    if using_qdrant:
+        if not q_url or not q_key:
+            lock_ui = True
+        else:
+            try:
+                # Attempt a lightweight connection test
+                # timeout=3 prevents the app from hanging forever on a bad URL
+                test_client = QdrantClient(url=q_url, api_key=q_key, timeout=3)
+                test_client.get_collections() 
+            except Exception as e:
+                # Catch Errno 11001 (Bad URL), 401 (Bad Key), etc.
+                lock_ui = True
+    
+    openai_functional = False
+    if oa_key:
+        try:
+            # Lightweight test: list models to check if key is valid
+            test_oa = OpenAI(api_key=oa_key)
+            test_oa.models.list()
+            openai_functional = True
+        except:
+            openai_functional = False
+
+# ---------------- MAIN APP INTERFACE ----------------
     st.title("📖 My Learning AI")
-    db = DBManager(
-        backend=st.session_state.chat_backend,
-        db_file=CHAT_DB_FILE,
-        qdrant_url=st.session_state.qdrant_url,
-        qdrant_api_key=st.session_state.qdrant_api_key,
-    )
+
+    if lock_ui:
+        st.error("⚠️ **Qdrant Backend Locked:** Please provide API credentials in Settings or switch back to **Local (FAISS)**.")
+        
+    if not openai_functional:
+        st.warning("⚠️ OpenAI Features Disabled: Mic, TTS, and GPT-4o require a valid API key.")
+
+    db = None
+    if using_qdrant and not lock_ui:
+        try:
+            # Create the client and try a simple lightweight operation
+            test_client = QdrantClient(url=q_url, api_key=q_key, timeout=3)
+            test_client.get_collections() 
+            
+            # If we reach here, the "rubbish" is actually valid or the server is up
+            active_backend = "sqlite" if lock_ui else st.session_state.chat_backend
+            db = DBManager(backend=active_backend, db_file=CHAT_DB_FILE, qdrant_url=q_url, qdrant_api_key=q_key)
+        except Exception as e:
+            # This triggers if the API key is wrong or URL is fake
+            lock_ui = True
+            st.error(f"⚠️ **Qdrant Connection Failed:** The credentials provided are incorrect or the server is down. Error: {e}")
+            
+    # Fallback/Default DB initialization
+    if db is None:
+        db = DBManager(backend="sqlite", db_file=CHAT_DB_FILE)
+
+    subjects = db.load_all_subjects()
 
     # ---------------- SIDEBAR ----------------
     with st.sidebar:
@@ -112,7 +165,6 @@ def main():
         st.markdown("---")
 
         st.header("📚 Subject Library")
-        subjects = db.load_all_subjects()
         
         if "General" not in subjects:
             db.add_subject("General")
@@ -121,7 +173,8 @@ def main():
         selected_sub = st.selectbox(
             "Select Subject", 
             subjects, 
-            index=subjects.index(st.session_state.current_subject) if st.session_state.current_subject in subjects else 0
+            index=subjects.index(st.session_state.current_subject) if st.session_state.current_subject in subjects else 0,
+            disabled=lock_ui
         )
         
         if selected_sub != st.session_state.current_subject:
@@ -132,7 +185,7 @@ def main():
             st.rerun()
 
         with st.expander("➕ New Subject"):
-            new_sub = st.text_input("Subject Name")
+            new_sub = st.text_input("Subject Name", disabled=lock_ui)
             if st.button("Create Subject") and new_sub.strip():
                 db.add_subject(new_sub.strip())
                 ensure_subject_folders(new_sub.strip())
@@ -169,10 +222,14 @@ def main():
             st.rerun()
         st.markdown("---")
 
-        st.header(f"💬 {st.session_state.current_subject} Chats")
-        all_chats = db.load_all_chats(st.session_state.current_subject)
+        all_chats = []
+        if not lock_ui:
+            try:
+                all_chats = db.load_all_chats(st.session_state.current_subject)
+            except Exception:
+                st.warning("⚠️ Could not load remote chats. Check your Qdrant URL.")
 
-        if st.button("🆕 Start New Chat"):
+        if st.button("🆕 Start New Chat", disabled=lock_ui):
             st.session_state.update({"messages": [], "current_chat_id": None})
             clear_tts(); st.rerun()
 
@@ -207,7 +264,7 @@ def main():
     except:
         ollama_models = ()
 
-    openai_models = ("gpt-4o",) if st.session_state.openai_api_key else ()
+    openai_models = ("gpt-4o",) if openai_functional else ()
     available_technical = ollama_models + openai_models
     display_models = [MODEL_MAP.get(m, m) for m in available_technical]
 
@@ -223,7 +280,7 @@ def main():
         "Model Selection", 
         display_models, 
         index=m_idx, 
-        disabled=st.session_state.current_chat_id is not None
+        disabled=st.session_state.current_chat_id is not None or lock_ui
     )
     st.session_state.selected_model = available_technical[display_models.index(selected_friendly)]
 
@@ -233,7 +290,7 @@ def main():
         if uploaded:
             st.session_state.uploaded_files_to_process = uploaded
 
-        if st.button("📂 Process RAG"):
+        if st.button("📂 Process RAG", disabled=lock_ui):
                 target_sub = st.session_state.current_subject
                 subject_path = os.path.join(SUBJECTS_DIR, target_sub)
                 
@@ -324,7 +381,7 @@ def main():
 
     if latest_a:
         if not has_audio:
-            if st.button("🔊 Listen"):
+            if st.button("🔊 Listen", disabled=not openai_functional):
                 with st.spinner("..."):
                     client = get_openai_client()
                     st.session_state.tts_audio_bytes = speak_text(latest_a, client, st.session_state.tts_voice)
@@ -339,6 +396,8 @@ def main():
 
     with col_mic:
         audio_data = audio_recorder(text="", icon_size="2x", key="recorder")
+        if audio_data and not openai_functional:
+            pass  # Mic disabled due to missing OpenAI key
         if audio_data and audio_data != st.session_state.get("last_audio_bytes"):
             st.session_state["last_audio_bytes"] = audio_data
             try:
@@ -350,7 +409,7 @@ def main():
             except Exception as e: st.error(f"Mic Error: {e}")
 
     with col_text:
-        typed_prompt = st.chat_input(f"Ask about {st.session_state.current_subject}...")
+        typed_prompt = st.chat_input(f"Ask about {st.session_state.current_subject}...", disabled=lock_ui)
         if typed_prompt:
             st.session_state.temp_prompt = typed_prompt
             clear_tts(); st.rerun()
