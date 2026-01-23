@@ -22,7 +22,8 @@ from modules.sqlite_db import (
 
 # --- Import Qdrant functions ---
 from modules.qdrant_db import (
-    create_new_chat_qdrant, 
+    create_new_chat_qdrant,
+    delete_subject_qdrant, 
     load_all_chats_qdrant, 
     load_chat_qdrant, 
     add_message_qdrant, 
@@ -50,18 +51,20 @@ class DBManager:
             return create_subject_meta_qdrant(subject_name)
 
     def load_all_subjects(self):
-        """Fetches subjects from the correct source based on active backend."""
+        if self.backend == "sqlite":
+            return load_all_subjects_sqlite(self.db_file)
         if self.backend == "qdrant":
             return load_all_subjects_qdrant()
-        return load_all_subjects_sqlite(self.db_file)
 
     def file_exists_in_rag(self, subject, filename):
         # Note: If you want Qdrant file checking, you'd add a branch here
         return file_exists_sqlite(self.db_file, subject, filename)
 
     def delete_subject(self, subject_name: str, rag_index_dir: str = None):
-        # To be fully clean, you should implement delete_subject_qdrant too
-        return delete_subject_sqlite(self.db_file, subject_name, rag_index_dir)
+        if self.backend == "sqlite":
+            return delete_subject_sqlite(self.db_file, subject_name, rag_index_dir)
+        if self.backend == "qdrant":
+                return delete_subject_qdrant(subject_name)
 
     # ----------------- Chat Management -----------------
 
@@ -112,9 +115,6 @@ class DBManager:
     # ----------------- RAG Document Management -----------------
 
     def add_rag_doc(self, target_id, file_name, content, vector_data: list = None, metadata=None):
-        """
-        target_id: In BOTH cases, this is now the subject_name for shared RAG.
-        """
         if self.backend == "qdrant":
             return add_rag_doc_qdrant(target_id, file_name, vector_data, content)
         
