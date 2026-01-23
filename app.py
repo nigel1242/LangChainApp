@@ -1,6 +1,7 @@
 # app.py
 from __future__ import annotations
 import os
+import re
 import sys
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
@@ -73,6 +74,16 @@ def main():
     def clear_tts():
         st.session_state.tts_audio_bytes = None
         st.session_state.tts_audio_for = ""
+    
+    def format_latex(text: str) -> str:
+        """Converts common LLM LaTeX delimiters to Streamlit-friendly ones."""
+        # Convert \[ ... \] to $$ ... $$ for block math
+        text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+        # Convert \( ... \) to $ ... $ for inline math
+        text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+        # Sometimes models use [ ] or ( ) without backslashes
+        # Only use these if you notice the model consistently failing backslashes
+        return text
 
     # -------- AUTHENTICATION --------
     is_authenticated, username = check_authentication()
@@ -464,11 +475,10 @@ def main():
 
         # --- SYNCED RAG SEARCH ---
         rag_content, raw_docs, has_docs = "", [], False
-        sources_to_display = [] # Initialize storage for citations
+        sources_to_display = [] 
         search_id = st.session_state.current_subject
         
         if st.session_state.rag_enabled:
-            # BRANCH 1: QDRANT (Remote)
             if st.session_state.vector_db == "qdrant":
                 try:
                     client = QdrantClient(url=st.session_state.qdrant_url, api_key=st.session_state.qdrant_api_key)
@@ -482,7 +492,6 @@ def main():
                         )
                 except Exception as e: st.error(f"Qdrant RAG Error: {e}")
 
-            # BRANCH 2: FAISS (Local)
             elif st.session_state.vector_db == "faiss":
                 subject_index_dir = os.path.join(SUBJECTS_DIR, search_id)
                 with st.spinner("🔍 Searching Knowledge Base (FAISS)..."):
@@ -492,7 +501,6 @@ def main():
                         vector_db="faiss"
                     )
 
-            # --- EXTRACT METADATA FOR VISUAL CONTEXT ---
             if raw_docs:
                 has_docs = True
                 seen = set()
@@ -508,12 +516,7 @@ def main():
         # --- CONSTRUCT PROMPT ---
         if has_docs and rag_content.strip():
             indicator = "📄 "
-            enhanced_p = f"""You are a helpful assistant. Use the following context to answer:
-    ---
-    CONTEXT:
-    {rag_content}
-    ---
-    USER QUESTION: {user_p}"""
+            enhanced_p = f"You are a helpful assistant. Context:\n{rag_content}\n\nQuestion: {user_p}"
         else:
             indicator = ""
             enhanced_p = user_p
@@ -526,9 +529,9 @@ def main():
                 for chunk in ollama.chat(model=st.session_state.selected_model, stream=True,
                                         messages=[{"role": "user", "content": enhanced_p, "images": images_to_send}]):
                     full_res += chunk.get("message", {}).get("content", "")
-                    stream_placeholder.markdown(indicator + full_res)
-                # Pass sources to completion
-                process_assistant_completion(chat_id, full_res, has_docs, sources=sources_to_display)
+                    # Format LaTeX during streaming
+                    stream_placeholder.markdown(indicator + format_latex(full_res))
+                process_assistant_completion(chat_id, format_latex(full_res), has_docs, sources=sources_to_display)
 
         elif st.session_state.selected_model in openai_models:
             client = get_openai_client()
@@ -540,9 +543,9 @@ def main():
                 for chunk in stream:
                     if chunk.choices[0].delta.content:
                         full_res += chunk.choices[0].delta.content
-                        stream_placeholder.markdown(indicator + full_res)
-                # Pass sources to completion
-                process_assistant_completion(chat_id, full_res, has_docs, sources=sources_to_display)
+                        # Format LaTeX during streaming
+                        stream_placeholder.markdown(indicator + format_latex(full_res))
+                process_assistant_completion(chat_id, format_latex(full_res), has_docs, sources=sources_to_display)
 
 if __name__ == "__main__":
     main()
