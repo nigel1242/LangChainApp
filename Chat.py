@@ -328,7 +328,7 @@ def main():
         if st.session_state.current_subject == "General":
                 st.info("💡 **Note:** You cannot upload documents to the 'General' subject. To upload and process documents for RAG, please **create a new subject** in the sidebar first.")
         else:
-                uploaded = st.file_uploader("Add files", type=["txt", "pdf", "docx", "pptx", "csv"], accept_multiple_files=True)
+                uploaded = st.file_uploader("Add files", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
                 if uploaded:
                     st.session_state.uploaded_files_to_process = uploaded
 
