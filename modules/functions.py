@@ -51,46 +51,6 @@ class OpenAIEmbeddings(Embeddings):
         return res.data[0].embedding
 
 ################################################################################
-# ----------------- File Processing -------------------
-
-def extract_text_from_file(file) -> str:
-    name = file.name.lower()
-    text = ""
-
-    if name.endswith(".pdf"):
-        doc = fitz.open(stream=file.read(), filetype="pdf")
-        for i, page in enumerate(doc, start=1):
-            txt = page.get_text("text")
-            if txt: 
-                # ADDED: Page marker for PDFs
-                text += f"--- Page {i} ---\n{txt}\n"
-        doc.close()
-
-    elif name.endswith(".docx"):
-        doc = DocxDocument(file)
-        text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-
-    elif name.endswith(".pptx"):
-        prs = Presentation(file)
-        slides_text = []
-        for i, slide in enumerate(prs.slides, start=1):
-            slide_text = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
-            # KEEPING: Your existing Slide marker
-            if slide_text: 
-                slides_text.append(f"--- Slide {i} ---\n" + "\n".join(slide_text))
-        text = "\n".join(slides_text)
-
-    elif name.endswith((".txt", ".md")):
-        text = file.read().decode("utf-8", errors="ignore")
-
-    elif name.endswith(".csv"):
-        try:
-            df = pd.read_csv(file)
-            text = df.to_string(index=False)
-        except Exception as e:
-            text = f"Error reading CSV: {e}"
-            
-    return text.strip()
 
 # ----------------- TTS & Audio -------------------
 

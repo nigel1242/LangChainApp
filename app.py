@@ -2,7 +2,6 @@
 from __future__ import annotations
 import os
 import re
-import sys
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
 from dotenv import load_dotenv
@@ -16,7 +15,6 @@ from modules.db_manager import DBManager
 from modules.functions import (
       OllamaEmbeddings,
       OpenAIEmbeddings,
-      extract_text_from_file,
       rebuild_rag_index,
       get_relevant_rag,
       get_b64_image,

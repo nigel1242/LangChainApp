@@ -9,10 +9,6 @@ import ollama
 # --- Local Module Imports ---
 from modules.db_manager import DBManager 
 from modules.functions import (
-    OllamaEmbeddings, 
-    OpenAIEmbeddings, 
-    extract_text_from_file,
-    get_relevant_rag, 
     rebuild_rag_index
 )
 from modules.login import check_authentication, login_page, logout
