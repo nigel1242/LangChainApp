@@ -478,7 +478,12 @@ def main():
     if uploaded_img is not None:
         # Update the session state with the current image bytes
         st.session_state.vision_images = [uploaded_img.getvalue()]
-        st.image(uploaded_img, caption="Image Ready", use_column_width=True)
+        col_img, _ = st.columns([1, 3]) 
+        with col_img:
+            st.image(
+                uploaded_img,
+                use_container_width=True
+            )
     # ---------------- PROCESSING ----------------
     if st.session_state.get("temp_prompt"):
         user_p = st.session_state.temp_prompt
