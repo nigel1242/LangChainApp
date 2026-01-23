@@ -116,6 +116,12 @@ def main():
         "qdrant_api_key": os.getenv("QDRANT_API_KEY", ""),
         "vision_uploader_key": 0,
     }
+    if "qdrant_client" not in st.session_state and using_qdrant and not lock_ui:
+        st.session_state.qdrant_client = QdrantClient(
+            url=st.session_state.qdrant_url, 
+            api_key=st.session_state.qdrant_api_key,
+            timeout=10 # Increased timeout for stability
+        )
     for key, val in defaults.items():
         if key not in st.session_state:
                 st.session_state[key] = val
@@ -519,15 +525,15 @@ def main():
                 # RAG Search Logic (Qdrant or FAISS)
                 if st.session_state.vector_db == "qdrant":
                     try:
-                            client = QdrantClient(url=st.session_state.qdrant_url, api_key=st.session_state.qdrant_api_key)
-                            with st.spinner("🔍 Searching Knowledge Base (Qdrant)..."):
-                                rag_content, raw_docs, search_success = get_relevant_rag(
-                                        CHAT_DB_FILE, None, search_id, user_p,
-                                        st.session_state.selected_model, ollama_models, openai_models,
-                                        vector_db="qdrant",
-                                        qdrant_url=st.session_state.qdrant_url,
-                                        qdrant_api_key=st.session_state.qdrant_api_key
-                                )
+                        client = st.session_state.qdrant_client
+                        with st.spinner("🔍 Searching Knowledge Base (Qdrant)..."):
+                            rag_content, raw_docs, search_success = get_relevant_rag(
+                                    CHAT_DB_FILE, None, search_id, user_p,
+                                    st.session_state.selected_model, ollama_models, openai_models,
+                                    vector_db="qdrant",
+                                    qdrant_url=st.session_state.qdrant_url,
+                                    qdrant_api_key=st.session_state.qdrant_api_key
+                            )
                     except Exception as e: st.error(f"Qdrant RAG Error: {e}")
                 elif st.session_state.vector_db == "faiss":
                     subject_index_dir = os.path.join(SUBJECTS_DIR, search_id)
