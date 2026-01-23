@@ -546,14 +546,21 @@ def main():
                     has_docs = True
                     seen = set()
                     for doc in raw_docs:
-                            m = doc.metadata
-                            f_name = m.get('file')
-                            p_num = m.get('page', 1)
-                            identifier = f"{f_name}_{p_num}"
-                            if f_name and identifier not in seen:
-                                sources_to_display.append({"file": f_name, "page": p_num})
-                                seen.add(identifier)
+                        # Determine if we are dealing with a Qdrant ScoredPoint or a LangChain Document
+                        if hasattr(doc, "payload"):
+                            m = doc.payload # Qdrant backend
+                        elif hasattr(doc, "metadata"):
+                            m = doc.metadata # FAISS backend
+                        else:
+                            m = {}
 
+        f_name = m.get('file') or m.get('file_name') # Support both naming conventions
+        p_num = m.get('page', 1)
+        
+        identifier = f"{f_name}_{p_num}"
+        if f_name and identifier not in seen:
+            sources_to_display.append({"file": f_name, "page": p_num})
+            seen.add(identifier)
         # --- CONSTRUCT PROMPT ---
         if has_docs and rag_content.strip():
                 indicator = "📄 "
