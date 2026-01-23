@@ -27,28 +27,46 @@ def update_env_key(key, value):
     set_key(ENV_FILE, key, value)
     os.environ[key] = value
 
-# Initialize environment on every script run
 init_env()
 
 # --- MODEL DISPLAY CONFIG ---
 MODEL_DISPLAY_NAMES = {
     "nomic-embed-text:v1.5": "Nomic Embed (Embedding Model)",
-    "qwen2.5vl:7b": "Qwen 2.5 VL (Vision Model)",
+    "llava:7b": "Llava (Vision Model)",
     "llama3:8b": "Llama3 8B (Base Model)",
 }
 MODELS_TO_OFFER = list(MODEL_DISPLAY_NAMES.keys())
 
 def download_model(model_name):
+    """Downloads model from Ollama with real-time percentage progress."""
     try:
-        with st.spinner(f"Downloading model: **{model_name}**..."):
-            ollama.pull(model_name)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Pull model with streaming enabled
+        stream = ollama.pull(model_name, stream=True)
+        
+        for chunk in stream:
+            # FIX: Check if 'completed' and 'total' are both present AND not None
+            # Some chunks only contain a 'status' string like "pulling manifest"
+            completed = chunk.get('completed')
+            total = chunk.get('total')
+            status = chunk.get('status', 'Processing...')
+
+            if completed is not None and total is not None and total > 0:
+                percent = completed / total
+                progress_bar.progress(min(percent, 1.0)) # Ensure it doesn't exceed 100%
+                status_text.markdown(f"📥 Downloading **{model_name}**: {percent*100:.1f}% complete")
+            else:
+                # Display the current status if we don't have numbers yet
+                status_text.markdown(f"🔍 **Status:** {status}")
+
         st.success(f"Downloaded model: {model_name}", icon="🎉")
         st.balloons()
-        sleep(1)
+        sleep(2)
         st.rerun()
     except Exception as e:
         st.error(f"Failed to download model: {model_name}. Error: {str(e)}", icon="😳")
-
 def main():
     st.subheader("⚙️ System Settings", divider="red", anchor=False)
 
@@ -70,8 +88,6 @@ def main():
 
         if st.button("💾 Save API Credentials", type="primary"):
             error_found = False
-            
-            # 1. TEST QDRANT (if values provided)
             if new_qdrant_url and new_qdrant_key:
                 try:
                     from qdrant_client import QdrantClient
@@ -81,7 +97,6 @@ def main():
                     st.error(f"Qdrant Connection Failed: {e}")
                     error_found = True
 
-            # 2. TEST OPENAI (if value provided)
             if new_openai:
                 try:
                     from openai import OpenAI
@@ -91,7 +106,6 @@ def main():
                     st.error(f"OpenAI Key Invalid: {e}")
                     error_found = True
 
-            # 3. SAVE ONLY IF PASSED (or if fields were cleared intentionally)
             if not error_found:
                 update_env_key("OPENAI_API_KEY", new_openai)
                 update_env_key("QDRANT_URL", new_qdrant_url)
@@ -103,10 +117,7 @@ def main():
     st.divider()
 
     # --- 2. SERVICE STATUS CHECKS ---
-    # Check OpenAI Key status for TTS
     openai_ready = bool(os.getenv("OPENAI_API_KEY"))
-    
-    # Check Ollama status
     ollama_online = True
     installed_models = []
     try:
@@ -118,15 +129,11 @@ def main():
     # --- 3. VOICE SELECTION SETTINGS ---
     st.subheader("🔊 Voice Selection", anchor=False)
     
-    if not openai_ready:
-        st.error("TTS is disabled. Please provide a valid OpenAI API Key in the configuration section above.")
-    
     voice_options = ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'ash', 'sage', 'coral']
     current_voice = st.session_state.get("tts_voice", "alloy")
     
     col_v1, col_v2 = st.columns([2, 1])
     with col_v1:
-        # Disable if no OpenAI key is present
         st.session_state.tts_voice = st.selectbox(
             "🎧 Select Voice for Answer Audio",
             voice_options,
@@ -141,14 +148,8 @@ def main():
             preview_text = f"Hello, I am the {st.session_state.tts_voice} voice. How do I sound?"
             try:
                 from app import speak_text 
-                from openai import OpenAI
-                
-                # 1. Initialize the client using the key from the environment
                 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                
-                # 2. Pass both the text AND the client to the function
                 audio_bytes = speak_text(preview_text, client)
-                
                 if audio_bytes:
                     st.audio(audio_bytes, format="audio/mp3")
             except Exception as e:
@@ -159,20 +160,21 @@ def main():
     # --- 4. DOWNLOAD MODELS SECTION ---
     st.subheader("📥 Download Models", anchor=False)
     if not ollama_online:
-        st.error("Download buttons are disabled because Ollama is not running.")
+        st.error("Ollama is not running. Please start Ollama to download models.")
+    
     installed_model_bases = {m.split('@')[0] for m in installed_models}
     cols = st.columns(len(MODELS_TO_OFFER))
     
     for i, model_name in enumerate(MODELS_TO_OFFER):
         display_name = MODEL_DISPLAY_NAMES.get(model_name, model_name)
         is_installed = model_name in installed_model_bases
-        disable_btn = is_installed or not ollama_online
         
-        btn_label = f"✅ {display_name}" if is_installed else f"📥 Download {display_name}"
-            
         with cols[i]:
-            if st.button(btn_label, key=f"dl_{model_name}", disabled=disable_btn, use_container_width=True):
-                download_model(model_name)
+            if is_installed:
+                st.button(f"✅ {display_name}", disabled=True, use_container_width=True)
+            else:
+                if st.button(f"📥 Download {display_name}", key=f"dl_{model_name}", disabled=not ollama_online, use_container_width=True):
+                    download_model(model_name)
 
     st.divider()
 
@@ -192,8 +194,6 @@ def main():
                     st.rerun()
                 except Exception as e:
                     st.error(f"Delete failed: {e}")
-    else:
-        st.info("No local models found or Ollama offline.")
 
 if __name__ == "__main__":
     main()
