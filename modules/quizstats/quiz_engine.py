@@ -650,7 +650,7 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
     # 1) BROAD SAMPLE for BLUEPRINT
     # -------------------------
     _, broad_docs, success = get_relevant_rag(
-        db_file="chat_playground.db",
+        db_file="chat.db",
         rag_index_dir=subject_dir,
         target_id=subject,
         query=f"{subject} key concepts definitions formulas examples common mistakes",
@@ -724,7 +724,7 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
 
         for q in queries:
             _, docs, ok = get_relevant_rag(
-                db_file="chat_playground.db",
+                db_file="chat.db",
                 rag_index_dir=subject_dir,
                 target_id=subject,
                 query=q,

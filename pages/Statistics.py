@@ -19,7 +19,7 @@ from modules.quizstats.progress_store import (
 # ------------------ CONFIGURATION ------------------
 st.set_page_config(page_title="Progress Statistics", page_icon="📊", layout="wide")
 QUESTIONS_PER_ATTEMPT = 10
-CHAT_DB_FILE = "chat_playground.db"
+CHAT_DB_FILE = "chat.db"
 
 
 # ============================================================

@@ -32,7 +32,7 @@ except Exception:
       HAS_QDRANT_HELPER = False
 
 load_dotenv()
-CHAT_DB_FILE = "chat_playground.db"
+CHAT_DB_FILE = "chat.db"
 SUBJECTS_DIR = os.path.join("modules", "subjects")
 os.makedirs(SUBJECTS_DIR, exist_ok=True)
 

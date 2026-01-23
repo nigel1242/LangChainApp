@@ -22,7 +22,7 @@ st.set_page_config(page_title="Quiz Builder", page_icon="📝", layout="wide")
 load_dotenv()
 
 BASE_DIR = Path(__file__).parents[1]
-CHAT_DB_FILE = str(BASE_DIR / "chat_playground.db")
+CHAT_DB_FILE = str(BASE_DIR / "chat.db")
 SUBJECTS_DIR = os.path.join("modules", "subjects") 
 
 os.makedirs(SUBJECTS_DIR, exist_ok=True)

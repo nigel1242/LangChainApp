@@ -8,7 +8,7 @@ __pycache__/
 
 # Databases
 quiz_stats.db
-chat_playground.db
+chat.db
 users.db
 
 # Distribution / packaging
