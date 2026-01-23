@@ -3,11 +3,6 @@ import os
 import re
 import sqlite3
 import streamlit as st
-from typing import List
-import pandas as pd
-from docx import Document as DocxDocument
-from pptx import Presentation
-import fitz  # PyMuPDF
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
