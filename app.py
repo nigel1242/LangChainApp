@@ -24,7 +24,7 @@ from modules.functions import (
 )
 from modules.login import check_authentication, login_page, logout
 from modules.quizstats.subject_store import ensure_subject_folders
-from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, save_uploaded_files
+from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, render_pdf_page_image, save_uploaded_files
 
 try:
     from modules.qdrant_db import search_rag_docs_qdrant
@@ -51,14 +51,22 @@ def get_openai_client() -> OpenAI:
 
 
 def main():
-    def process_assistant_completion(chat_id, full_res, used_rag):
-        """Saves completion to DB and prepares TTS metadata."""
+    def process_assistant_completion(chat_id, full_res, used_rag, sources=None):
+        """Saves completion to DB with source metadata for visual context."""
         st.session_state.last_assistant_text = full_res
         st.session_state.tts_audio_for = ""
         st.session_state.tts_audio_bytes = None
         
+        # Save to DB (Ensure your DBManager.add_message can handle a sources/metadata column if possible)
         db.add_message(chat_id, "assistant", full_res, used_rag=int(used_rag))
-        st.session_state.messages.append({"role": "assistant", "content": full_res, "used_rag": int(used_rag)})
+        
+        # Append to session state with sources
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": full_res, 
+            "used_rag": int(used_rag),
+            "sources": sources  # List of {'file': '...', 'page': ...}
+        })
         st.session_state.vision_images = []
         st.rerun()
 
@@ -374,6 +382,20 @@ def main():
     for msg in st.session_state.messages:
         with message_container.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else "😎"):
             st.markdown(("📄 " if msg.get("used_rag") else "") + msg["content"])
+            
+            # New: Display Source Images
+            if msg.get("sources"):
+                with st.expander("🔍 View Source Material"):
+                    cols = st.columns(len(msg["sources"]))
+                    for i, source in enumerate(msg["sources"]):
+                        f_name = source.get("file")
+                        page_num = source.get("page", 1)
+                        pdf_path = os.path.join(SUBJECTS_DIR, st.session_state.current_subject, "raw", f_name)
+                        
+                        if os.path.exists(pdf_path):
+                            img = render_pdf_page_image(pdf_path, page_num)
+                            if img:
+                                cols[i].image(img, caption=f"{f_name} (p. {page_num})")
 
     # ---------------- TTS CONTROLS ----------------
     latest_a = st.session_state.get("last_assistant_text", "").strip()
@@ -442,30 +464,15 @@ def main():
 
         # --- SYNCED RAG SEARCH ---
         rag_content, raw_docs, has_docs = "", [], False
+        sources_to_display = [] # Initialize storage for citations
         search_id = st.session_state.current_subject
         
         if st.session_state.rag_enabled:
             # BRANCH 1: QDRANT (Remote)
             if st.session_state.vector_db == "qdrant":
                 try:
-                    client = QdrantClient(
-                        url=st.session_state.qdrant_url, 
-                        api_key=st.session_state.qdrant_api_key
-                    )
-                    
-                    # 1. Metadata Check for UI Indicator
-                    res = client.scroll(
-                        collection_name="rag_docs_metadata",
-                        scroll_filter=qmodels.Filter(
-                            must=[qmodels.FieldCondition(key="subject_name", match=qmodels.MatchValue(value=search_id))]
-                        ),
-                        limit=1
-                    )
-                    if res and res[0]:
-                        has_docs = True
-
-                    # 2. Vector Search Retrieval
-                    with st.spinner("🔍 Searching Knowledge Base..."):
+                    client = QdrantClient(url=st.session_state.qdrant_url, api_key=st.session_state.qdrant_api_key)
+                    with st.spinner("🔍 Searching Knowledge Base (Qdrant)..."):
                         rag_content, raw_docs, search_success = get_relevant_rag(
                             CHAT_DB_FILE, None, search_id, user_p, 
                             st.session_state.selected_model, ollama_models, openai_models, 
@@ -473,47 +480,40 @@ def main():
                             qdrant_url=st.session_state.qdrant_url,
                             qdrant_api_key=st.session_state.qdrant_api_key
                         )
-                    
-                    if search_success and len(raw_docs) > 0:
-                        has_docs = True
-
-                except Exception as e: 
-                    st.error(f"RAG Error: {e}")
+                except Exception as e: st.error(f"Qdrant RAG Error: {e}")
 
             # BRANCH 2: FAISS (Local)
             elif st.session_state.vector_db == "faiss":
                 subject_index_dir = os.path.join(SUBJECTS_DIR, search_id)
-                rag_content, raw_docs, has_docs = get_relevant_rag(
-                    CHAT_DB_FILE, subject_index_dir, search_id, user_p, 
-                    st.session_state.selected_model, ollama_models, openai_models, 
-                    vector_db="faiss"
-                )
+                with st.spinner("🔍 Searching Knowledge Base (FAISS)..."):
+                    rag_content, raw_docs, has_docs = get_relevant_rag(
+                        CHAT_DB_FILE, subject_index_dir, search_id, user_p, 
+                        st.session_state.selected_model, ollama_models, openai_models, 
+                        vector_db="faiss"
+                    )
 
-        # --- FINAL GUARD & PROMPT CONSTRUCTION ---
-        # Ensure content is substantial enough to use
-        if not rag_content or len(str(rag_content).strip()) < 10:
-            rag_content = ""
-
-        if has_docs and rag_content:
-            indicator = "📄 "
-            enhanced_p = f"Use the following context to answer:\n{rag_content}\n\nQuestion: {user_p}"
-        else:
-            indicator = ""
-            enhanced_p = user_p
+            # --- EXTRACT METADATA FOR VISUAL CONTEXT ---
+            if raw_docs:
+                has_docs = True
+                seen = set()
+                for doc in raw_docs:
+                    m = doc.metadata
+                    f_name = m.get('file')
+                    p_num = m.get('page', 1)
+                    identifier = f"{f_name}_{p_num}"
+                    if f_name and identifier not in seen:
+                        sources_to_display.append({"file": f_name, "page": p_num})
+                        seen.add(identifier)
 
         # --- CONSTRUCT PROMPT ---
         if has_docs and rag_content.strip():
             indicator = "📄 "
-            enhanced_p = f"""You are a helpful assistant. Use the following pieces of retrieved context to answer the user's question. 
-
-If the provided context contains the answer, prioritize that information. 
-
----
-CONTEXT:
-{rag_content}
----
-
-USER QUESTION: {user_p}"""
+            enhanced_p = f"""You are a helpful assistant. Use the following context to answer:
+    ---
+    CONTEXT:
+    {rag_content}
+    ---
+    USER QUESTION: {user_p}"""
         else:
             indicator = ""
             enhanced_p = user_p
@@ -524,11 +524,11 @@ USER QUESTION: {user_p}"""
             with message_container.chat_message("assistant", avatar="🤖"):
                 stream_placeholder = st.empty(); full_res = ""
                 for chunk in ollama.chat(model=st.session_state.selected_model, stream=True,
-                                         messages=[{"role": "user", "content": enhanced_p, "images": images_to_send}]):
-                    delta = chunk.get("message", {}).get("content", "")
-                    full_res += delta
+                                        messages=[{"role": "user", "content": enhanced_p, "images": images_to_send}]):
+                    full_res += chunk.get("message", {}).get("content", "")
                     stream_placeholder.markdown(indicator + full_res)
-                process_assistant_completion(chat_id, full_res, has_docs)
+                # Pass sources to completion
+                process_assistant_completion(chat_id, full_res, has_docs, sources=sources_to_display)
 
         elif st.session_state.selected_model in openai_models:
             client = get_openai_client()
@@ -539,10 +539,10 @@ USER QUESTION: {user_p}"""
                 stream = client.chat.completions.create(model=st.session_state.selected_model, messages=history, stream=True)
                 for chunk in stream:
                     if chunk.choices[0].delta.content:
-                        delta = chunk.choices[0].delta.content
-                        full_res += delta
+                        full_res += chunk.choices[0].delta.content
                         stream_placeholder.markdown(indicator + full_res)
-                process_assistant_completion(chat_id, full_res, has_docs)
+                # Pass sources to completion
+                process_assistant_completion(chat_id, full_res, has_docs, sources=sources_to_display)
 
 if __name__ == "__main__":
     main()
