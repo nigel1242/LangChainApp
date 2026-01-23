@@ -305,11 +305,15 @@ def main():
 
     # ---------------- RAG UPLOADS ----------------
     with st.expander(f"📤 Knowledge Base: {st.session_state.current_subject}"):
-        uploaded = st.file_uploader("Add files", type=["txt", "pdf", "docx", "pptx", "csv"], accept_multiple_files=True)
-        if uploaded:
-            st.session_state.uploaded_files_to_process = uploaded
+        # Check if the current subject is "General"
+        if st.session_state.current_subject == "General":
+            st.info("💡 **Note:** You cannot upload documents to the 'General' subject. To upload and process documents for RAG, please **create a new subject** in the sidebar first.")
+        else:
+            uploaded = st.file_uploader("Add files", type=["txt", "pdf", "docx", "pptx", "csv"], accept_multiple_files=True)
+            if uploaded:
+                st.session_state.uploaded_files_to_process = uploaded
 
-        if st.button("📂 Process RAG", disabled=lock_ui):
+            if st.button("📂 Process RAG", disabled=lock_ui):
                 target_sub = st.session_state.current_subject
                 subject_path = os.path.join(SUBJECTS_DIR, target_sub)
                 
@@ -337,9 +341,7 @@ def main():
                         content = extract_text_from_path(final_path)
                         final_filename = os.path.basename(final_path)
                         
-                        # --- 1. FAISS PATH (LEAVE AS IS) ---
-                        # We store the WHOLE content in SQLite. 
-                        # rebuild_rag_index_faiss will handle its own chunking/metadata later.
+                        # --- 1. FAISS PATH ---
                         if st.session_state.vector_db == "faiss":
                             db.add_rag_doc(
                                 target_id=target_sub, 
@@ -349,11 +351,10 @@ def main():
                                 vector_data=None 
                             )
 
-                        # --- 2. QDRANT PATH (FIXED WITH CHUNKING) ---
+                        # --- 2. QDRANT PATH ---
                         elif st.session_state.vector_db == "qdrant":
                             chunks = qdrant_splitter.split_text(content)
                             for i, chunk_text in enumerate(chunks):
-                                # Push Ollama Vector for this chunk
                                 ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
                                 v_ollama = ollama_embedder.embed_query(chunk_text)
                                 db.add_rag_doc(
@@ -364,7 +365,6 @@ def main():
                                     metadata={"engine": "ollama", "part": i}
                                 )
 
-                                # Push OpenAI Vector for this chunk
                                 if st.session_state.openai_api_key:
                                     openai_embedder = OpenAIEmbeddings(
                                         model_name="text-embedding-3-small",
@@ -379,7 +379,6 @@ def main():
                                         metadata={"engine": "openai", "part": i}
                                     )
                     
-                    # REBUILD FAISS (Uses the full content stored in SQLite)
                     rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", ollama_models, openai_models, suffix="ollama")
                     if st.session_state.openai_api_key:
                         rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", ollama_models, openai_models, suffix="openai")

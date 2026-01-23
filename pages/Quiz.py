@@ -45,12 +45,17 @@ if not is_authenticated:
 
 # ---------- SESSION DEFAULTS ----------
 if "quiz_state" not in st.session_state:
+    # Get all subjects and filter out 'General'
+    all_subs = db.load_all_subjects()
+    available_subs = [s for s in all_subs if s != "General"]
+    
     st.session_state.quiz_state = {
-        "selected_subject": st.session_state.get("current_subject", "General"),
+        # Default to the first non-General subject, or None if empty
+        "selected_subject": available_subs[0] if available_subs else None,
         "quiz": [],
         "current_idx": 0,
         "score": 0,
-        "submitted": {}, # Stores {question_index: True}
+        "submitted": {}, 
     }
 
 S = st.session_state.quiz_state
@@ -91,13 +96,22 @@ is_openai = "gpt" in st.session_state.selected_model.lower()
 suffix = "openai" if is_openai else "ollama"
 
 # ---------- SUBJECT SELECTION ----------
-subject_names = db.load_all_subjects()
-current_default_sub = st.session_state.get("current_subject", subject_names[0] if subject_names else "General")
+subject_names = [s for s in db.load_all_subjects() if s != "General"]
+
+if not subject_names:
+    st.warning("⚠️ No subjects found. Please create a subject in the main Chat App first.")
+    st.stop()
+
+# Ensure the session state index is valid for the filtered list
+try:
+    default_idx = subject_names.index(S["selected_subject"])
+except (ValueError, KeyError):
+    default_idx = 0
 
 selected_subject = st.selectbox(
     "📚 Select Subject for Quiz",
     subject_names,
-    index=subject_names.index(current_default_sub) if current_default_sub in subject_names else 0
+    index=default_idx
 )
 
 if selected_subject != S["selected_subject"]:
