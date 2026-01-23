@@ -147,7 +147,7 @@ def main():
         if st.button("▶️ Preview Voice", disabled=not openai_ready, use_container_width=True):
             preview_text = f"Hello, I am the {st.session_state.tts_voice} voice. How do I sound?"
             try:
-                from app import speak_text 
+                from Chat import speak_text 
                 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
                 audio_bytes = speak_text(preview_text, client)
                 if audio_bytes:
