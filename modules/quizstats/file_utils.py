@@ -14,7 +14,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pptx import Presentation
 import pandas as pd
-import win32com
+import win32com.client
 import pythoncom
 from langchain_core.documents import Document
 
@@ -73,6 +73,60 @@ def save_uploaded_files(subject_name: str, files) -> List[str]:
         saved.append(dest)
 
     return saved
+
+import win32com.client
+import pythoncom
+import streamlit as st
+
+def convert_to_pdf(input_path: str) -> str:
+    abs_input = os.path.abspath(input_path)
+    pdf_output = os.path.splitext(abs_input)[0] + ".pdf"
+    ext = os.path.splitext(abs_input)[1].lower()
+    
+    if os.path.exists(pdf_output): return pdf_output
+
+    pythoncom.CoInitialize() 
+    try:
+        if ext == ".pptx":
+            app = win32com.client.DispatchEx("PowerPoint.Application")
+            obj = app.Presentations.Open(abs_input, True, False, False)
+            obj.SaveAs(pdf_output, 32) # 32 = ppFixedFormatTypePDF
+        elif ext == ".docx":
+            app = win32com.client.DispatchEx("Word.Application")
+            obj = app.Documents.Open(abs_input, ReadOnly=True, Visible=False)
+            obj.SaveAs(pdf_output, 17) # 17 = wdExportFormatPDF
+        
+        obj.Close()
+        app.Quit()
+        return pdf_output
+    except Exception as e:
+        st.error(f"Conversion failed: {e}")
+        return None
+    finally:
+        pythoncom.CoUninitialize()
+
+def extract_text_from_path(file_path: str) -> str:
+    """
+    Reads a PDF from a physical disk path and extracts text with page markers.
+    Used for standardized PDF-only processing.
+    """
+    text = ""
+    if not os.path.exists(file_path):
+        return ""
+        
+    try:
+        # Open the PDF file from the disk path
+        doc = fitz.open(file_path)
+        for i, page in enumerate(doc, start=1):
+            txt = page.get_text("text")
+            if txt:
+                # We add these markers so the RAG knows exactly which page it's on
+                text += f"--- Page {i} ---\n{txt}\n"
+        doc.close()
+    except Exception as e:
+        print(f"Error extracting text from path {file_path}: {e}")
+        
+    return text
 
 
 
@@ -690,28 +744,18 @@ def render_pdf_first_page_image(pdf_path: str):
             doc.close()
 
 
-def render_pdf_page_image(pdf_path: str, page_number: int):
-    """
-    Returns a PIL.Image of a specific 1-based page, or None if fail.
-    """
-    doc = None
-    try:
-        doc = fitz.open(pdf_path)
-        if len(doc) == 0:
-            return None
-
-        page_index = max(0, min(page_number - 1, len(doc) - 1))
-        page = doc[page_index]
-        mat = fitz.Matrix(2, 2)
-        pix = page.get_pixmap(matrix=mat)
-        img = _pixmap_to_pil(pix)
-        return img
-    except Exception as e:
-        print(f"[file_utils] render_pdf_page_image error for {pdf_path}: {e}")
-        return None
-    finally:
-        if doc is not None:
-            doc.close()
+def render_pdf_page_image(pdf_path, page_num):
+    doc = fitz.open(pdf_path)
+    # page_num is 1-indexed from your RAG, Fitz is 0-indexed
+    page = doc.load_page(page_num - 1) 
+    
+    # Increase zoom for better quality (2.0 = 2x resolution)
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+    
+    # Convert to bytes for st.image
+    img_data = pix.tobytes("png")
+    doc.close()
+    return img_data
 
 
 def render_pptx_slide_image(pptx_path: str, slide_number: int):
