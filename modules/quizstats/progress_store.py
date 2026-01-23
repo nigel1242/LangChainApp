@@ -95,20 +95,6 @@ def record_attempt(
         conn.close()
 
 
-def list_subjects_with_stats() -> List[str]:
-    """
-    Return a list of subject names that have at least one recorded attempt.
-    """
-    conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT DISTINCT subject FROM attempts ORDER BY subject ASC"
-        ).fetchall()
-        return [r["subject"] for r in rows]
-    finally:
-        conn.close()
-
-
 def get_attempts_for_subject(subject: str) -> List[Dict[str, Any]]:
     """
     Return all attempts for a given subject as a list of dicts.
