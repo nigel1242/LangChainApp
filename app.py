@@ -213,15 +213,31 @@ def main():
                 st.session_state.messages = []
                 st.rerun()
 
-        if selected_sub != "General":  # Prevent deleting the default subject
-                if st.button(f"Delete {selected_sub}", type="secondary"):
-                    db.delete_subject(selected_sub, rag_index_dir=SUBJECTS_DIR)
-                    st.session_state.current_subject = "General"
-                    st.session_state.current_chat_id = None
-                    st.session_state.messages = []
-                    
-                    st.success(f"Subject '{selected_sub}' deleted.")
-                    st.rerun()
+        if selected_sub != "General":
+            # 1. The initial "Delete" button
+            if st.button(f"🗑️ Delete {selected_sub}", type="primary", use_container_width=True):
+                st.session_state.confirm_delete = True
+
+            # 2. The Confirmation UI
+            if st.session_state.get("confirm_delete"):
+                st.warning(f"⚠️ Are you sure? This will permanently delete all chats and RAG data for **{selected_sub}**.")
+                
+                col_yes, col_no = st.columns(2)
+                
+                with col_yes:
+                    if st.button("✅ Yes, Delete", type="primary", use_container_width=True):
+                        db.delete_subject(selected_sub, rag_index_dir=SUBJECTS_DIR)
+                        st.session_state.current_subject = "General"
+                        st.session_state.current_chat_id = None
+                        st.session_state.messages = []
+                        st.session_state.confirm_delete = False # Reset state
+                        st.success(f"Subject '{selected_sub}' deleted.")
+                        st.rerun()
+                
+                with col_no:
+                    if st.button("❌ Cancel", use_container_width=True):
+                        st.session_state.confirm_delete = False # Reset state
+                        st.rerun()
 
         st.markdown("---")
         backend_choice = st.selectbox(
