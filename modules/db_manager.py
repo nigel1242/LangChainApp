@@ -30,7 +30,8 @@ from modules.qdrant_db import (
     delete_chat_qdrant, 
     add_rag_doc_qdrant,
     load_all_subjects_qdrant,
-    create_subject_meta_qdrant
+    create_subject_meta_qdrant,
+    file_exists_qdrant
 )
 
 class DBManager:
@@ -56,9 +57,12 @@ class DBManager:
         if self.backend == "qdrant":
             return load_all_subjects_qdrant()
 
-    def file_exists_in_rag(self, subject, filename):
-        # Note: If you want Qdrant file checking, you'd add a branch here
-        return file_exists_sqlite(self.db_file, subject, filename)
+    def file_exists_in_rag(self, subject, filename, vector_size=4096):
+        if self.backend == "sqlite":
+            return file_exists_sqlite(self.db_file, subject, filename)
+        if self.backend == "qdrant":
+            return file_exists_qdrant(subject, filename, vector_size)
+
 
     def delete_subject(self, subject_name: str, rag_index_dir: str = None):
         if self.backend == "sqlite":

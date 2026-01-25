@@ -319,36 +319,48 @@ def main():
         if st.session_state.current_subject == "General":
             st.info("💡 **Note:** You cannot upload documents to the 'General' subject. Create a new subject in the sidebar first.")
         else:
-            uploaded = st.file_uploader("Add files", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
-            if uploaded:
-                st.session_state.uploaded_files_to_process = uploaded
-
+            uploaded_files = st.file_uploader("Add files", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
+            
             if st.button("📂 Process RAG", disabled=lock_ui):
                 target_sub = st.session_state.current_subject
-                files_to_process = st.session_state.uploaded_files_to_process
-                total_files = len(files_to_process)
                 
-                if total_files > 0:
-                    # Initialize Progress components
+                if uploaded_files:
+                    raw_dir = os.path.join("modules", "subjects", target_sub, "raw")
+                    os.makedirs(raw_dir, exist_ok=True)
+                    existing_filenames = os.listdir(raw_dir)
+                    
+                    # Availability Flags
+                    use_openai = bool(st.session_state.openai_api_key)
+                    use_ollama = True 
+
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    msg_placeholder = st.empty()
+                    msg_placeholder = st.empty() # For duplicate alerts
                     
                     qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
-                    for i, f in enumerate(files_to_process):
-                        # Update progress UI
-                        percent_val = (i) / total_files
+                    for i, f in enumerate(uploaded_files):
+                        # Update Progress
+                        percent_val = (i + 1) / len(uploaded_files)
                         progress_bar.progress(percent_val)
-                        status_text.text(f"⏳ Processing {i+1}/{total_files}: {f.name}...")
+                        
+                        # --- DUPLICATE CHECK ---
+                        if f.name in existing_filenames:
+                            msg_placeholder.warning(f"⚠️ {f.name} already exists. Skipping...")
+                            time.sleep(1.5) # Brief pause so user can read it
+                            msg_placeholder.empty()
+                            continue 
 
+                        # --- NEW FILE PROCESSING ---
+                        status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
+                        
                         f.seek(0)
                         save_uploaded_files(target_sub, [f])
-                        original_path = os.path.join("modules", "subjects", target_sub, "raw", f.name)
+                        original_path = os.path.join(raw_dir, f.name)
                         
+                        # Convert PPTX/DOCX to PDF
                         ext = f.name.split('.')[-1].lower()
                         final_path = original_path
-
                         if ext in ["pptx", "docx"]:
                             pdf_path = convert_to_pdf(original_path)
                             if pdf_path and pdf_path != original_path:
@@ -358,53 +370,48 @@ def main():
                         
                         content = extract_text_from_path(final_path)
                         final_filename = os.path.basename(final_path)
-                        
-                        # --- 1. FAISS PATH (Duplicate check included) ---
-                        if st.session_state.vector_db == "faiss":
-                            success, message = db.add_rag_doc(
-                                target_id=target_sub,
-                                file_name=final_filename,
-                                content=content,
-                                metadata={"file": final_filename, "subject": target_sub}
-                            )
-                            if not success:
-                                msg_placeholder.info(f"ℹ️ {final_filename} already exists. Skipping...")
-                                time.sleep(2)
-                                msg_placeholder.empty()
-                                continue # Skip to next file
 
-                        # --- 2. QDRANT PATH ---
+                        # --- PATH A: FAISS ---
+                        if st.session_state.vector_db == "faiss":
+                            if use_ollama:
+                                db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
+                                            content=content, metadata={"engine": "ollama"})
+                            if use_openai:
+                                db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
+                                            content=content, metadata={"engine": "openai"})
+
+                        # --- PATH B: QDRANT ---
                         elif st.session_state.vector_db == "qdrant":
                             chunks = qdrant_splitter.split_text(content)
                             for chunk_text in chunks:
-                                ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-                                v_ollama = ollama_embedder.embed_query(chunk_text)
-                                db.add_rag_doc(
-                                    target_id=target_sub, file_name=final_filename,
-                                    content=chunk_text, vector_data=v_ollama,
-                                    metadata={"engine": "ollama"}
-                                )
-                                if st.session_state.openai_api_key:
-                                    openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
+                                if use_ollama:
+                                    ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+                                    v_ollama = ollama_embedder.embed_query(chunk_text)
+                                    db.add_rag_doc(target_id=target_sub, file_name=final_filename,
+                                                content=chunk_text, vector_data=v_ollama,
+                                                metadata={"engine": "ollama"})
+                                if use_openai:
+                                    openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
+                                                                    api_key=st.session_state.openai_api_key)
                                     v_openai = openai_embedder.embed_query(chunk_text)
-                                    db.add_rag_doc(
-                                        target_id=target_sub, file_name=final_filename,
-                                        content=chunk_text, vector_data=v_openai,
-                                        metadata={"engine": "openai"}
-                                    )
+                                    db.add_rag_doc(target_id=target_sub, file_name=final_filename,
+                                                content=chunk_text, vector_data=v_openai,
+                                                metadata={"engine": "openai"})
 
-                    # Final Synchronization UI
-                    progress_bar.progress(1.0)
-                    status_text.text("🔄 Rebuilding search indexes...")
-                    
-                    subject_path = os.path.join(SUBJECTS_DIR, target_sub)
-                    rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", ollama_models, openai_models, suffix="ollama")
-                    if st.session_state.openai_api_key:
-                        rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", ollama_models, openai_models, suffix="openai")
-                    
-                    st.success(f"✅ Knowledge Base Synced!")
-                    time.sleep(3)
-                    st.session_state.uploaded_files_to_process = []
+                    # --- FINAL FAISS SYNC ---
+                    if st.session_state.vector_db == "faiss":
+                        subject_path = os.path.join(SUBJECTS_DIR, target_sub)
+                        if use_ollama:
+                            status_text.text("🔄 Rebuilding Ollama FAISS index...")
+                            rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
+                                            ollama_models, openai_models, suffix="ollama")
+                        if use_openai:
+                            status_text.text("🔄 Rebuilding OpenAI FAISS index...")
+                            rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
+                                            ollama_models, openai_models, suffix="openai")
+
+                    st.success(f"✅ Knowledge Base Processed!")
+                    time.sleep(2)
                     st.rerun()
 
     # ---------------- CHAT INTERFACE ----------------

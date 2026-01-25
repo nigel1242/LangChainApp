@@ -193,6 +193,33 @@ def add_rag_doc_qdrant(subject_name: str, file_name: str, vector_data: list, con
     except Exception as e:
         return False, str(e)
 
+def file_exists_qdrant(subject_name: str, file_name: str, vector_size: int) -> bool:
+    """
+    Checks if a file has already been indexed in a specific Qdrant collection.
+    """
+    collection_name = get_doc_collection_name(vector_size)
+    
+    # 1. Verify collection exists before querying
+    existing = [c.name for c in client.get_collections().collections]
+    if collection_name not in existing:
+        return False
+
+    # 2. Filter search for subject + filename
+    result = client.scroll(
+        collection_name=collection_name,
+        scroll_filter=qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(key="subject_name", match=qmodels.MatchValue(value=subject_name)),
+                qmodels.FieldCondition(key="file_name", match=qmodels.MatchValue(value=file_name))
+            ]
+        ),
+        limit=1, # We only need to find one record to confirm it exists
+        with_payload=False
+    )
+    
+    # Scroll returns a tuple of (points, next_page_offset)
+    return len(result[0]) > 0
+
 # ------------------ Cleanup ------------------
 def delete_chat_qdrant(chat_id: str):
     """Deletes only the chat metadata and its messages."""
