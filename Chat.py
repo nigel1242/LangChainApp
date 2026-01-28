@@ -20,8 +20,7 @@ from modules.functions import (
     speak_text, generate_chat_title
 )
 from modules.login import check_authentication, login_page, logout
-from modules.quizstats.subject_store import ensure_subject_folders
-from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, render_pdf_page_image, save_uploaded_files
+from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, render_pdf_page_image, save_uploaded_files, ensure_subject_folders
 
 load_dotenv()
 CHAT_DB_FILE = "chat.db"

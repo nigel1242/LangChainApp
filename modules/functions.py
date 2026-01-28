@@ -1,12 +1,12 @@
 # modules/functions.py
 import os
-import re
 import sqlite3
+import fitz
 import streamlit as st
-
+from pptx import Presentation
+from typing import List
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
-from langchain_community.vectorstores import Qdrant as QdrantVectorStore
 import ollama
 from openai import OpenAI
 from langchain_core.embeddings import Embeddings
@@ -14,12 +14,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 
-from modules.quizstats.file_utils import _pdf_page_texts_for_index, _pptx_slide_texts_for_index
-
 # Dictionary to store active FAISS index references to prevent file locking
 _LOADED_FAISS_INDEXES = {}
 
-################################################################################
 # ----------------- Embeddings -------------------
 
 class OllamaEmbeddings(Embeddings):
@@ -45,7 +42,20 @@ class OpenAIEmbeddings(Embeddings):
         res = self.client.embeddings.create(model=self.model_name, input=query)
         return res.data[0].embedding
 
-################################################################################
+# ----------------- openai -------------------
+
+def get_openai_client() -> OpenAI | None:
+    """
+    Centralized helper to get OpenAI client using either 
+    Streamlit session state or .env file.
+    """
+    # Check Streamlit session state first, then fall back to .env
+    api_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
+    
+    if not api_key or api_key.strip() == "":
+        return None
+        
+    return OpenAI(api_key=api_key.strip())
 
 # ----------------- TTS & Audio -------------------
 
@@ -74,6 +84,23 @@ def speak_text(answer: str, openai_client: OpenAI, voice: str = "alloy") -> byte
     except Exception as e:
         print(f"Audio generation failed: {e}")
         return None
+
+# ----------------- extractions -------------------
+
+def _pdf_page_texts_for_index(path: str) -> List[str]:
+    """Return per-page text for a PDF."""
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return []
+    pages: List[str] = []
+    for page in doc:
+        txt = page.get_text("text") or ""
+        pages.append(txt)
+    doc.close()
+    return pages
+
+
 
 # ----------------- RAG with FAISS (Local) -------------------
 
@@ -114,23 +141,6 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
                             "type": "pdf_page"
                         }
                     ))
-
-        # ---------- PPTX ----------
-        elif ext.endswith(".pptx"):
-            slides = _pptx_slide_texts_for_index(raw_path)
-            for slide_num, slide_text in enumerate(slides, start=1):
-                for chunk_idx, chunk in enumerate(splitter.split_text(slide_text), start=1):
-                    all_docs.append(Document(
-                        page_content=chunk,
-                        metadata={
-                            "file": file_name,
-                            "file_path": raw_path,
-                            "slide": slide_num,
-                            "chunk": chunk_idx,
-                            "type": "pptx_slide"
-                        }
-                    ))
-            if not all_docs: return
 
     # 3. Embeddings & Saving
     if not suffix:

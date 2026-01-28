@@ -1,28 +1,13 @@
 # modules/quizstats/quiz_engine.py
-from __future__ import annotations
-
 import json
 import os
 import random
 import re
-from typing import Any, Dict, List, Optional
-
 import ollama
-from openai import OpenAI
 
-# NEW: use the subject index so we know which slide/page a question came from
+from typing import Any, Dict, List, Optional
 from modules.quizstats.file_utils import get_subject_index_entries
-
-
-# -------------------------------------------------------------
-#   OLLAMA/OPENAI CLIENT HANDLING
-# -------------------------------------------------------------
-def _get_openai_client() -> OpenAI | None:
-    """Gets the OpenAI client if the API key is available."""
-    key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not key:
-        return None
-    return OpenAI(api_key=key)
+from modules.functions import get_openai_client
 
 
 # -------------------------------------------------------------
@@ -50,7 +35,7 @@ def _llm_json(model_name: str, system: str, user: str) -> dict | None:
     is_openai_model = "gpt" in (model_name or "").lower()
 
     if is_openai_model:
-        client = _get_openai_client()
+        client = get_openai_client()
         if client is None:
             return None
         try:
@@ -309,7 +294,7 @@ def _call_ollama_for_chunk(model_name, chunk_text, subject, max_q, context_meta=
 #   OPENAI QUESTION GENERATOR
 # -------------------------------------------------------------
 def _call_openai_for_chunk(model_name, chunk_text, subject, max_q, context_meta=None):
-    client = _get_openai_client()
+    client = get_openai_client()
     if client is None:
         return []
 

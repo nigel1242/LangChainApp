@@ -2,19 +2,16 @@
 
 import os
 import json
-from typing import List, Dict, Any
-
+import streamlit as st
 import fitz  # PyMuPDF
-from docx import Document as DocxDocument
-from docx.opc.exceptions import PackageNotFoundError
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pptx import Presentation
-import pandas as pd
 import win32com.client
 import pythoncom
-from langchain_core.documents import Document
 
-from modules.quizstats.subject_store import SUBJECTS_DIR
+from typing import List, Dict, Any
+
+BASE_DIR = os.path.dirname(os.path.dirname(__file__)) 
+SUBJECTS_DIR = os.path.join(BASE_DIR, "subjects")
+os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
 # ------------ extension sets ------------
 
@@ -66,10 +63,6 @@ def save_uploaded_files(subject_name: str, files) -> List[str]:
 
     return saved
 
-import win32com.client
-import pythoncom
-import streamlit as st
-
 def convert_to_pdf(input_path: str) -> str:
     abs_input = os.path.abspath(input_path)
     pdf_output = os.path.splitext(abs_input)[0] + ".pdf"
@@ -119,211 +112,6 @@ def extract_text_from_path(file_path: str) -> str:
         print(f"Error extracting text from path {file_path}: {e}")
         
     return text
-
-
-
-# ------------ text extraction helpers ------------
-
-def _read_text_file(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            return fh.read()
-    except UnicodeDecodeError:
-        with open(path, "r", encoding="cp1252", errors="ignore") as fh:
-            return fh.read()
-
-
-def _extract_text_pdf(path: str) -> str:
-    doc = fitz.open(path)
-    text_parts: List[str] = []
-    for page in doc:
-        txt = page.get_text("text")
-        if txt and txt.strip():
-            text_parts.append(txt)
-    doc.close()
-    return "\n".join(text_parts)
-
-
-def _extract_text_docx(path: str) -> str:
-    """
-    Extract text from a .docx file.
-
-    - Skips temp files like '~$something.docx'
-    - Includes:
-        * Paragraph text
-        * Table cell text
-        * Image 'alt text' / descriptions where available
-    """
-    fname = os.path.basename(path)
-    if fname.startswith("~$"):
-        return ""
-
-    try:
-        doc = DocxDocument(path)
-    except PackageNotFoundError:
-        return ""
-    except Exception:
-        return ""
-
-    parts: List[str] = []
-
-    # Paragraphs
-    for p in doc.paragraphs:
-        if p.text and p.text.strip():
-            parts.append(p.text.strip())
-
-    # Tables
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                txt = cell.text.strip()
-                if txt:
-                    parts.append(txt)
-
-    # Image descriptions / alt text (best-effort)
-    try:
-        for shp in doc.inline_shapes:
-            try:
-                docPr = shp._inline.docPr
-                descr = docPr.get("descr")
-                title = docPr.get("title")
-                for t in (title, descr):
-                    if t and t.strip():
-                        parts.append(t.strip())
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    return "\n".join(parts)
-
-
-def _docx_sections_for_index(path: str) -> List[str]:
-    """
-    Produce smaller 'sections' from a DOCX file to use for context matching.
-    Group paragraphs into chunks of ~250+ chars.
-    """
-    try:
-        doc = DocxDocument(path)
-    except Exception:
-        return []
-
-    chunks: List[str] = []
-    buffer: List[str] = []
-    length = 0
-
-    def flush():
-        nonlocal buffer, length
-        if buffer:
-            text = " ".join(buffer).strip()
-            if text:
-                chunks.append(text)
-        buffer = []
-        length = 0
-
-    # paragraphs
-    for p in doc.paragraphs:
-        txt = (p.text or "").strip()
-        if not txt:
-            continue
-        buffer.append(txt)
-        length += len(txt)
-        if length >= 250:
-            flush()
-
-    # tables as additional chunks
-    for table in doc.tables:
-        tbuf: List[str] = []
-        for row in table.rows:
-            for cell in row.cells:
-                txt = cell.text.strip()
-                if txt:
-                    tbuf.append(txt)
-        if tbuf:
-            chunks.append(" ".join(tbuf))
-
-    flush()
-    return chunks
-
-
-def _extract_text_pptx(path: str) -> str:
-    """
-    Extract text from a .pptx presentation: slide by slide.
-    Also includes shape 'alt text' / description where available.
-    """
-    try:
-        prs = Presentation(path)
-    except Exception:
-        return ""
-
-    parts: List[str] = []
-    for i, slide in enumerate(prs.slides, start=1):
-        slide_text: List[str] = []
-
-        for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text:
-                slide_text.append(shape.text)
-
-            try:
-                alt = getattr(shape, "alternative_text", "") or ""
-                if alt.strip():
-                    slide_text.append(alt.strip())
-            except Exception:
-                pass
-
-        if slide_text:
-            parts.append(f"--- Slide {i} ---\n" + "\n".join(slide_text))
-
-    return "\n\n".join(parts)
-
-
-def _pptx_slide_texts_for_index(path: str) -> List[str]:
-    """Return a list of per-slide texts for indexing."""
-    try:
-        prs = Presentation(path)
-    except Exception:
-        return []
-
-    slides_text: List[str] = []
-    for slide in prs.slides:
-        slide_text: List[str] = []
-        for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text:
-                slide_text.append(shape.text)
-            try:
-                alt = getattr(shape, "alternative_text", "") or ""
-                if alt.strip():
-                    slide_text.append(alt.strip())
-            except Exception:
-                pass
-        if slide_text:
-            slides_text.append(" ".join(slide_text))
-        else:
-            slides_text.append("")
-    return slides_text
-
-
-def _extract_text_csv(path: str) -> str:
-    try:
-        df = pd.read_csv(path)
-        return df.to_string(index=False)
-    except Exception as e:
-        return f"Error reading CSV: {e}"
-
-
-def _pdf_page_texts_for_index(path: str) -> List[str]:
-    """Return per-page text for a PDF."""
-    try:
-        doc = fitz.open(path)
-    except Exception:
-        return []
-    pages: List[str] = []
-    for page in doc:
-        txt = page.get_text("text") or ""
-        pages.append(txt)
-    doc.close()
-    return pages
-
 
 # ------------ context search helpers ------------
 
