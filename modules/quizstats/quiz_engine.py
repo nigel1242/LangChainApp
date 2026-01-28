@@ -1,13 +1,28 @@
 # modules/quizstats/quiz_engine.py
+from __future__ import annotations
+
 import json
 import os
 import random
 import re
-import ollama
-
 from typing import Any, Dict, List, Optional
+
+import ollama
+from openai import OpenAI
+
+# NEW: use the subject index so we know which slide/page a question came from
 from modules.quizstats.file_utils import get_subject_index_entries
-from modules.functions import get_openai_client
+
+
+# -------------------------------------------------------------
+#   OLLAMA/OPENAI CLIENT HANDLING
+# -------------------------------------------------------------
+def _get_openai_client() -> OpenAI | None:
+    """Gets the OpenAI client if the API key is available."""
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not key:
+        return None
+    return OpenAI(api_key=key)
 
 
 # -------------------------------------------------------------
@@ -30,12 +45,86 @@ def _norm_q(q: str) -> str:
     return re.sub(r"\s+", " ", (q or "").strip().lower())
 
 
+def _normalize_choices(choices: List[str]) -> List[str]:
+    """Ensure exactly 4 choices and A)/B)/C)/D) prefixes."""
+    clean = [str(c).strip() for c in (choices or []) if str(c).strip()]
+    if len(clean) < 4:
+        return []
+    clean = clean[:4]
+    labels = ["A) ", "B) ", "C) ", "D) "]
+    normalized: List[str] = []
+    for label, choice in zip(labels, clean):
+        c = choice
+        if not c.startswith(label):
+            c = f"{label}{c.lstrip('ABCD). ').strip()}"
+        normalized.append(c)
+    return normalized
+
+
+def _normalize_math_text(text: str) -> str:
+    """Normalize math formatting for Streamlit-friendly LaTeX."""
+    if not text:
+        return ""
+
+    out = text
+
+    # Normalize \(...\) and \[...\] to $...$ for Streamlit markdown.
+    out = re.sub(r"\\\((.*?)\\\)", r"$\1$", out, flags=re.DOTALL)
+    out = re.sub(r"\\\[(.*?)\\\]", r"$\1$", out, flags=re.DOTALL)
+
+    # Remove unnecessary parentheses around equations like "( y = ... )".
+    out = re.sub(r"\(\s*([A-Za-z][^()=]*=\s*[^()]+)\s*\)", r"\1", out)
+
+    # Replace common plain-text math with LaTeX forms.
+    replacements = {
+        r"\bL\{([^}]+)\}": r"$\\mathcal{L}\{\1\}$",
+        r"\bLaplace\s*\{\s*([^}]+)\s*\}": r"$\\mathcal{L}\{\1\}$",
+        r"\bint_([0-9]+)\^([0-9]+)\b": r"$\\int_{\1}^{\2}$",
+        r"\bsqrt\(([^)]+)\)": r"$\\sqrt{\1}$",
+        r"\b1/([A-Za-z0-9_]+)\b": r"$\\frac{1}{\1}$",
+    }
+    for pattern, repl in replacements.items():
+        out = re.sub(pattern, repl, out)
+
+    return out
+
+
+def _parse_answer_index(val: Any) -> int | None:
+    """
+    Parse answer_index robustly to remove 'Option A bias'.
+    Accepts:
+      - 0..3
+      - "0".."3"
+      - "A"/"B"/"C"/"D" (and variants like "A)", "B.", "C )")
+    Returns 0..3, or None if invalid.
+    """
+    if val is None:
+        return None
+
+    if isinstance(val, int):
+        return val if 0 <= val <= 3 else None
+
+    s = str(val).strip().upper()
+    if not s:
+        return None
+
+    m = re.match(r"^([ABCD])", s)
+    if m:
+        return {"A": 0, "B": 1, "C": 2, "D": 3}[m.group(1)]
+
+    try:
+        n = int(s)
+        return n if 0 <= n <= 3 else None
+    except Exception:
+        return None
+
+
 def _llm_json(model_name: str, system: str, user: str) -> dict | None:
     """Unified JSON call for OpenAI/Ollama. Returns dict or None."""
     is_openai_model = "gpt" in (model_name or "").lower()
 
     if is_openai_model:
-        client = get_openai_client()
+        client = _get_openai_client()
         if client is None:
             return None
         try:
@@ -228,11 +317,12 @@ def _get_unified_system_msg():
         "1) Use ONLY what is explicitly present in <notes>. No outside knowledge.\n"
         "2) Create exactly 1 question and exactly 4 distinct options.\n"
         "3) Choices MUST be prefixed 'A) ', 'B) ', 'C) ', 'D) '.\n"
-        "4) Ensure answer_index is correct (0=A, 1=B, 2=C, 3=D).\n"
+        "4) Ensure answer_index is correct (0=A, 1=B, 2=C, 3=D) OR use A/B/C/D.\n"
         "5) Explanation MUST include:\n"
         "   - a short direct quote from the notes AND\n"
         "   - 1–2 sentences of reasoning/inference/calculation (not just restating)\n"
         "6) Use LaTeX for math ($...$) and escape backslashes (\\\\).\n"
+        "7) If the content is mathematical, include LaTeX in BOTH the question and the choices.\n"
         "Return valid JSON only."
     )
 
@@ -250,6 +340,7 @@ IMPORTANT QUALITY REQUIREMENTS:
 - Do NOT ask questions about references/URLs or document housekeeping.
 - Prefer calculation, graph/table interpretation, inference, application, compare/contrast.
 - The question must require thinking, not just scanning for a phrase.
+- For math topics, ensure LaTeX is used in the question AND the choices (wrap math in $...$).
 
 JSON format:
 {{
@@ -294,7 +385,7 @@ def _call_ollama_for_chunk(model_name, chunk_text, subject, max_q, context_meta=
 #   OPENAI QUESTION GENERATOR
 # -------------------------------------------------------------
 def _call_openai_for_chunk(model_name, chunk_text, subject, max_q, context_meta=None):
-    client = get_openai_client()
+    client = _get_openai_client()
     if client is None:
         return []
 
@@ -340,16 +431,14 @@ def _parse_raw_quiz_json(
 
     for q in qs:
         question = str(q.get("question", "")).strip()
-        choices = [str(c).strip() for c in (q.get("choices", []) or [])]
+        choices = _normalize_choices(q.get("choices", []))
         if len(choices) != 4 or not question:
             continue
 
-        try:
-            ans = int(q.get("answer_index", 0))
-        except Exception:
-            ans = 0
-        if ans < 0 or ans > 3:
-            ans = 0
+        ans = _parse_answer_index(q.get("answer_index", None))
+        if ans is None:
+            # Do not default to A; reject invalid answer_index to remove bias
+            continue
 
         explanation = str(q.get("explanation", "")).strip() or "Refer to notes."
         needs_image = bool(q.get("needs_image", False))
@@ -387,10 +476,10 @@ def _parse_raw_quiz_json(
 
         out.append(
             {
-                "question": question,
-                "choices": choices,
+                "question": _normalize_math_text(question),
+                "choices": [_normalize_math_text(c) for c in choices],
                 "answer_idx": ans,
-                "explanation": explanation,
+                "explanation": _normalize_math_text(explanation),
                 "needs_image": needs_image,
                 "image_hint": image_hint,
                 "source_hint": src_hint,
@@ -418,20 +507,29 @@ def _fallback_quiz(corpus_text: str, subject: str, n_questions: int) -> List[Dic
         if len(words) < 6:
             continue
         idx = random.randint(3, len(words) - 3)
-        ans = words[idx]
+        ans_word = words[idx]
         words[idx] = "_____"
         stem = " ".join(words)
 
         wrongs = random.sample([w for w in words if w != "_____"], min(3, max(3, len(words) - 1)))
-        choices = [ans] + wrongs
-        random.shuffle(choices)
+        choices_raw = [ans_word] + wrongs
+        random.shuffle(choices_raw)
+
+        normalized = _normalize_choices(choices_raw)
+        if not normalized:
+            continue
+
+        # Find correct index after normalization
+        # normalized choices look like "A) <text>"
+        stripped = [c[3:].strip() for c in normalized]
+        answer_idx = stripped.index(ans_word) if ans_word in stripped else 0
 
         out.append(
             {
-                "question": stem,
-                "choices": choices[:4] if len(choices) >= 4 else (choices + ["..."])[:4],
-                "answer_idx": choices.index(ans) if ans in choices else 0,
-                "explanation": "Look at the original sentence.",
+                "question": _normalize_math_text(stem),
+                "choices": [_normalize_math_text(c) for c in normalized],
+                "answer_idx": answer_idx,
+                "explanation": _normalize_math_text("Look at the original sentence."),
                 "needs_image": False,
                 "image_hint": "",
                 "source_hint": s[:40],
@@ -478,14 +576,15 @@ def build_quiz_from_corpus(
                 model_name,
                 chunk_text,
                 subject,
-                max_q=1,
+                max_q=min(2, remain),
                 context_meta=ctx,
             )
 
             for q in qs:
                 if all(q["question"] != e["question"] for e in quiz):
                     quiz.append(q)
-                    break
+                    if len(quiz) >= n_questions:
+                        break
 
     if len(quiz) < n_questions:
         print("[quiz_engine] Index produced fewer questions; topping up.")
@@ -540,6 +639,7 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
     subject_dir = os.path.join("modules", "subjects", subject)
     is_openai = "gpt" in model_name.lower()
     suffix = "openai" if is_openai else "ollama"
+    verify_enabled = False
 
     # -------------------------
     # LOW-VALUE FILTERS
@@ -569,16 +669,16 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
                 return True
 
         # ultra short -> usually low insight
-        if len(t) < 35:
+        if len(t) < 28:
             return True
 
         return False
 
     def _explanation_has_reasoning(exp: str) -> bool:
         e = (exp or "").strip()
-        if len(e) < 40:
+        if len(e) < 30:
             return False
-        if "reason" in e.lower():
+        if any(token in e.lower() for token in ("reason", "because", "therefore", "thus")):
             return True
         # at least 2 sentences heuristic
         if len(re.split(r"(?<=[.!?])\s+", e)) >= 2:
@@ -624,7 +724,7 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
             seq = SequenceMatcher(None, n, old).ratio()
 
             # tuned to block rephrases
-            if jacc >= 0.55 or seq >= 0.82:
+            if jacc >= 0.65 or seq >= 0.88:
                 return True
         return False
 
@@ -671,7 +771,7 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
     final_quiz: List[Dict[str, Any]] = []
 
     attempts = 0
-    max_attempts = max(50, n_questions * 12)
+    max_attempts = max(40, n_questions * 6)
 
     while len(final_quiz) < n_questions and attempts < max_attempts:
         attempts += 1
@@ -686,35 +786,32 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
             if alternatives:
                 topic, styles, keywords = random.choice(alternatives)
 
-        style = random.choice(styles) if styles else "application"
+        styles = styles or ["application"]
+        style = random.choice(styles)
 
         # per-topic queries (push variety + calculations/graphs)
-        queries = []
+        queries: List[str] = []
         if keywords:
-            for k in keywords[:3]:
+            for k in keywords[:2]:
                 queries.append(f"{topic} {k} explanation example")
-                queries.append(f"{topic} {k} common misconception")
         else:
             queries.append(f"{topic} explanation example")
-            queries.append(f"{topic} common misconception")
 
-        # extra variety drivers
+        # lightweight variety drivers
         queries.append(f"{topic} calculation worked example")
-        queries.append(f"{topic} graph table interpretation")
-        queries.append(f"{topic} application scenario best method")
 
         # retrieve docs
         per_topic_docs = []
         seen_meta = set()
 
-        for q in queries:
+        for qtxt in queries:
             _, docs, ok = get_relevant_rag(
                 db_file="chat.db",
                 rag_index_dir=subject_dir,
                 target_id=subject,
-                query=q,
+                query=qtxt,
                 model_name=model_name,
-                top_k=12,
+                top_k=6,
                 vector_db=vector_db,
                 suffix=suffix,
             )
@@ -749,86 +846,92 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
         if len(chunk) < 140:
             continue
 
-        # generate ONE question
-        qs = call_fn(model_name, chunk, subject, max_q=1, context_meta=None)
+        # generate up to TWO questions to improve yield
+        qs = call_fn(model_name, chunk, subject, max_q=2, context_meta=None)
         if not qs:
             continue
 
-        qobj = qs[0]
-        qobj["context_meta"] = getattr(doc, "metadata", {}) or {}
+        generated = False
+        for qobj in qs:
+            qobj["context_meta"] = getattr(doc, "metadata", {}) or {}
 
-        ck = _context_key(qobj["context_meta"])
-        if ck in used_context_keys:
+            ck = _context_key(qobj["context_meta"])
+            if ck in used_context_keys:
+                continue
+
+            # hard reject low-value / rephrased duplicates
+            if _is_low_value_question(qobj.get("question", "")):
+                continue
+            if _too_similar(qobj.get("question", "")):
+                continue
+
+            # verify + fix
+            mcq_for_verify = {
+                "question": qobj.get("question", ""),
+                "choices": qobj.get("choices", []),
+                "answer_index": int(qobj.get("answer_idx", 0)),
+                "explanation": qobj.get("explanation", ""),
+                "difficulty": qobj.get("difficulty", "medium"),
+                "topic": qobj.get("topic", topic) or topic,
+            }
+
+            if verify_enabled:
+                v = _llm_json(model_name, _verify_system(), _verify_user(chunk, mcq_for_verify))
+                if v:
+                    ok = bool(v.get("ok", False))
+                    fixed = v.get("fixed") if isinstance(v.get("fixed"), dict) else None
+                    if not ok and not fixed:
+                        continue
+                    item = fixed if fixed else mcq_for_verify
+                else:
+                    item = mcq_for_verify
+            else:
+                item = mcq_for_verify
+
+            # validate output
+            choices = _normalize_choices(item.get("choices", []) or [])
+            if not isinstance(choices, list) or len(choices) != 4:
+                continue
+
+            ans = _parse_answer_index(item.get("answer_index", None))
+            if ans is None:
+                continue
+
+            question_text = str(item.get("question", "")).strip()
+            explanation_text = str(item.get("explanation", "")).strip()
+
+            if _is_low_value_question(question_text):
+                continue
+            if _too_similar(question_text):
+                continue
+            if not _explanation_has_reasoning(explanation_text):
+                continue
+
+            final_topic = str(item.get("topic", topic)).strip() or topic
+
+            upgraded = {
+                "question": _normalize_math_text(question_text),
+                "choices": [_normalize_math_text(c) for c in choices],
+                "answer_idx": ans,
+                "explanation": _normalize_math_text(explanation_text),
+                "needs_image": False,
+                "image_hint": "",
+                "source_hint": " ".join(chunk.split()[:30]),
+                "difficulty": str(item.get("difficulty", "medium")).strip() or "medium",
+                "topic": final_topic,
+                "context_meta": qobj["context_meta"],
+            }
+
+            # commit trackers
+            used_context_keys.add(ck)
+            seen_questions_norm.append(_norm_q(upgraded["question"]))
+            topic_counts[final_topic] = topic_counts.get(final_topic, 0) + 1
+            final_quiz.append(upgraded)
+            generated = True
+            if len(final_quiz) >= n_questions:
+                break
+
+        if generated:
             continue
-
-        # hard reject low-value / rephrased duplicates
-        if _is_low_value_question(qobj.get("question", "")):
-            continue
-        if _too_similar(qobj.get("question", "")):
-            continue
-
-        # verify + fix
-        mcq_for_verify = {
-            "question": qobj.get("question", ""),
-            "choices": qobj.get("choices", []),
-            "answer_index": int(qobj.get("answer_idx", 0)),
-            "explanation": qobj.get("explanation", ""),
-            "difficulty": qobj.get("difficulty", "medium"),
-            "topic": qobj.get("topic", topic) or topic,
-        }
-
-        v = _llm_json(model_name, _verify_system(), _verify_user(chunk, mcq_for_verify))
-        if not v:
-            continue
-
-        ok = bool(v.get("ok", False))
-        fixed = v.get("fixed") if isinstance(v.get("fixed"), dict) else None
-        if not ok and not fixed:
-            continue
-
-        item = fixed if fixed else mcq_for_verify
-
-        # validate output
-        choices = item.get("choices", []) or []
-        if not isinstance(choices, list) or len(choices) != 4:
-            continue
-
-        try:
-            ans = int(item.get("answer_index", 0))
-        except Exception:
-            continue
-        if ans < 0 or ans > 3:
-            continue
-
-        question_text = str(item.get("question", "")).strip()
-        explanation_text = str(item.get("explanation", "")).strip()
-
-        if _is_low_value_question(question_text):
-            continue
-        if _too_similar(question_text):
-            continue
-        if not _explanation_has_reasoning(explanation_text):
-            continue
-
-        final_topic = str(item.get("topic", topic)).strip() or topic
-
-        upgraded = {
-            "question": question_text,
-            "choices": [str(c).strip() for c in choices],
-            "answer_idx": ans,
-            "explanation": explanation_text,
-            "needs_image": False,
-            "image_hint": "",
-            "source_hint": " ".join(chunk.split()[:30]),
-            "difficulty": str(item.get("difficulty", "medium")).strip() or "medium",
-            "topic": final_topic,
-            "context_meta": qobj["context_meta"],
-        }
-
-        # commit trackers
-        used_context_keys.add(ck)
-        seen_questions_norm.append(_norm_q(upgraded["question"]))
-        topic_counts[final_topic] = topic_counts.get(final_topic, 0) + 1
-        final_quiz.append(upgraded)
 
     return final_quiz

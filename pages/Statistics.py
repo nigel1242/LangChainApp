@@ -140,13 +140,37 @@ with st.expander("⚠️ Danger Zone"):
 # ------------------ DATAFRAME ------------------
 df = pd.DataFrame(attempts)
 
-cols = ["ts_ms", "is_correct", "topic", "question", "chosen", "correct", "difficulty", "source_hint"]
+# ✅ remove source_hint completely (you requested this)
+if "source_hint" in df.columns:
+    df = df.drop(columns=["source_hint"])
+
+cols = ["ts_ms", "is_correct", "topic", "question", "chosen", "correct", "difficulty"]
 for col in cols:
     if col not in df.columns:
         df[col] = None
 
-df["ts_ms"] = pd.to_numeric(df["ts_ms"], errors="coerce").fillna(0).astype(int)
-df = df[(df["ts_ms"] > 0) & (df["question"].astype(str).str.strip().ne(""))].sort_values("ts_ms").reset_index(drop=True)
+# ---- ts_ms cleaning (DON'T DROP if missing/0; FIX it) ----
+df["ts_ms"] = pd.to_numeric(df["ts_ms"], errors="coerce")
+
+# if missing timestamps exist, fill forward; if still missing, use "now"
+now_ms = int(datetime.now().timestamp() * 1000)
+df["ts_ms"] = df["ts_ms"].fillna(0)
+
+# convert 0 -> NaN so ffill works
+df.loc[df["ts_ms"] <= 0, "ts_ms"] = pd.NA
+
+# fill from previous valid timestamp
+df["ts_ms"] = df["ts_ms"].ffill()
+
+# if still missing (e.g., all were missing), fill with now
+df["ts_ms"] = df["ts_ms"].fillna(now_ms).astype("int64")
+
+# ---- only drop truly empty questions ----
+df["question"] = df["question"].astype(str)
+df = df[df["question"].str.strip().ne("")].copy()
+
+# stable sort so equal timestamps don't reorder unpredictably
+df = df.sort_values(["ts_ms"], kind="mergesort").reset_index(drop=True)
 
 if df.empty:
     st.warning("No valid data points found.")
@@ -214,7 +238,7 @@ topic_stats = att_df.groupby("topic").agg(
 ).reset_index()
 topic_stats["Accuracy %"] = (topic_stats["Correct"] / topic_stats["Questions"] * 100).round(1)
 
-st.dataframe(topic_stats.sort_values("Accuracy %"), width='stretch', hide_index=True)
+st.dataframe(topic_stats.sort_values("Accuracy %"), use_container_width=True, hide_index=True)
 
 # ------------------ ATTEMPT HISTORY ------------------
 st.subheader("🧾 Score History")
@@ -227,7 +251,7 @@ history = df_scope.groupby("attempt_id").agg(
 history["Score"] = history.apply(lambda r: f"{int(r['Correct'])} / {int(r['Questions'])}", axis=1)
 history["Accuracy %"] = (history["Correct"] / history["Questions"] * 100).round(1)
 
-st.dataframe(history.sort_values("attempt_id", ascending=False), width='stretch', hide_index=True)
+st.dataframe(history.sort_values("attempt_id", ascending=False), use_container_width=True, hide_index=True)
 
 # ------------------ MISTAKE TRACKER ------------------
 st.subheader("❌ Recent Mistakes")
@@ -236,7 +260,7 @@ mistakes = df_scope[df_scope["correct_bool"] == False].sort_values("ts_ms", asce
 if mistakes.empty:
     st.success("No mistakes found! Keep it up.")
 else:
-    view_cols = ["datetime", "attempt_id", "topic", "question", "chosen", "correct", "source_hint"]
+    view_cols = ["datetime", "attempt_id", "topic", "question", "chosen", "correct"]
     st.dataframe(
         mistakes[view_cols].rename(
             columns={
@@ -246,6 +270,6 @@ else:
                 "correct": "Correct Answer",
             }
         ),
-        width='stretch',
+        use_container_width=True,
         hide_index=True,
     )
