@@ -280,7 +280,7 @@ if S["quiz"]:
             if f_name and os.path.exists(pdf_path):
                 img = render_pdf_page_image(pdf_path, page_num)
                 if img:
-                    st.image(img, caption=f"Source: {f_name} | Page {page_num}", use_container_width=True)
+                    st.image(img, caption=f"Source: {f_name} | Page {page_num}", width='stretch')
                 else:
                     st.warning("Rendering failed for this page.")
             else:

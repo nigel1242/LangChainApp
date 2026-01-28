@@ -44,18 +44,12 @@ class OpenAIEmbeddings(Embeddings):
 
 # ----------------- openai -------------------
 
-def get_openai_client() -> OpenAI | None:
-    """
-    Centralized helper to get OpenAI client using either 
-    Streamlit session state or .env file.
-    """
-    # Check Streamlit session state first, then fall back to .env
+def get_openai_client() -> OpenAI:
     api_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
-    
-    if not api_key or api_key.strip() == "":
-        return None
-        
-    return OpenAI(api_key=api_key.strip())
+    api_key = api_key.strip()
+    if not api_key:
+        raise RuntimeError("OpenAI API key missing. Set it in settings.")
+    return OpenAI(api_key=api_key)
 
 # ----------------- TTS & Audio -------------------
 

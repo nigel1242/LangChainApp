@@ -214,7 +214,7 @@ topic_stats = att_df.groupby("topic").agg(
 ).reset_index()
 topic_stats["Accuracy %"] = (topic_stats["Correct"] / topic_stats["Questions"] * 100).round(1)
 
-st.dataframe(topic_stats.sort_values("Accuracy %"), use_container_width=True, hide_index=True)
+st.dataframe(topic_stats.sort_values("Accuracy %"), width='stretch', hide_index=True)
 
 # ------------------ ATTEMPT HISTORY ------------------
 st.subheader("🧾 Score History")
@@ -227,7 +227,7 @@ history = df_scope.groupby("attempt_id").agg(
 history["Score"] = history.apply(lambda r: f"{int(r['Correct'])} / {int(r['Questions'])}", axis=1)
 history["Accuracy %"] = (history["Correct"] / history["Questions"] * 100).round(1)
 
-st.dataframe(history.sort_values("attempt_id", ascending=False), use_container_width=True, hide_index=True)
+st.dataframe(history.sort_values("attempt_id", ascending=False), width='stretch', hide_index=True)
 
 # ------------------ MISTAKE TRACKER ------------------
 st.subheader("❌ Recent Mistakes")
@@ -246,6 +246,6 @@ else:
                 "correct": "Correct Answer",
             }
         ),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
     )

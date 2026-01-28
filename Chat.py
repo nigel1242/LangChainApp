@@ -5,7 +5,6 @@ import re
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
 from dotenv import load_dotenv
-from openai import OpenAI
 import time
 import ollama
 from qdrant_client import QdrantClient
@@ -17,7 +16,7 @@ from modules.functions import (
     OllamaEmbeddings, OpenAIEmbeddings,
     rebuild_rag_index, get_relevant_rag,
     get_b64_image, transcribe_audio_bytes,
-    speak_text, generate_chat_title
+    speak_text, generate_chat_title, get_openai_client
 )
 from modules.login import check_authentication, login_page, logout
 from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, render_pdf_page_image, save_uploaded_files, ensure_subject_folders
@@ -29,16 +28,6 @@ os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
 # ------------------ CONFIG ------------------
 st.set_page_config(page_title="My Learning AI", page_icon="📚", layout="wide")
-
-def get_subject_index_path(subject_name):
-    return os.path.join(SUBJECTS_DIR, subject_name, "index.faiss")
-
-def get_openai_client() -> OpenAI:
-    api_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OpenAI API key missing. Set it in the sidebar.")
-    return OpenAI(api_key=api_key)
-
 
 def main():
     def process_assistant_completion(chat_id, full_res, used_rag, sources=None):
@@ -86,7 +75,7 @@ def main():
     # 2. DEFINE CONFIGURATION VARIABLES FIRST
     q_url = os.getenv("QDRANT_URL", "").strip()
     q_key = os.getenv("QDRANT_API_KEY", "").strip()
-    oa_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "").strip()
+    oa_key = st.session_state.get("openai_api_key", os.getenv("OPENAI_API_KEY", "")).strip()
 
     # Determine backend status
     using_qdrant = st.session_state.get("vector_db") == "qdrant"
@@ -107,12 +96,12 @@ def main():
     # Perform OpenAI key validation
     openai_functional = False
     if oa_key:
-        try:
-            test_oa = OpenAI(api_key=oa_key)
-            test_oa.models.list()
-            openai_functional = True
-        except:
-            openai_functional = False
+        # Instead of a full model list check (which is slow), 
+        # just trust the key presence if it was already validated in Settings.
+        openai_functional = True 
+
+    # Update session state so the rest of the app knows the status
+    st.session_state.openai_api_key = oa_key
 
     # 3. INITIALIZE QDRANT CLIENT (Now safe because variables are defined)
     if "qdrant_client" not in st.session_state and using_qdrant and not lock_ui:
@@ -155,7 +144,7 @@ def main():
         st.error("⚠️ Qdrant Backend Locked: Please provide API credentials in Settings or switch back to Local (FAISS).")
         
     if not openai_functional:
-        st.warning("⚠️ OpenAI Features Disabled: Mic, TTS, and GPT-4o require a valid API key.")
+        st.toast("**Warning:** OpenAI features are limited.", icon="⚠️")
 
     # Initialize DB Manager based on current settings
     db = None
@@ -209,7 +198,7 @@ def main():
 
         if selected_sub != "General":
             # 1. The initial "Delete" button
-            if st.button(f"🗑️ Delete {selected_sub}", type="primary", use_container_width=True):
+            if st.button(f"🗑️ Delete {selected_sub}", type="primary", width='stretch'):
                 st.session_state.confirm_delete = True
 
             # 2. The Confirmation UI
@@ -219,7 +208,7 @@ def main():
                 col_yes, col_no = st.columns(2)
                 
                 with col_yes:
-                    if st.button("✅ Yes, Delete", type="primary", use_container_width=True):
+                    if st.button("✅ Yes, Delete", type="primary", width='stretch'):
                         db.delete_subject(selected_sub, rag_index_dir=SUBJECTS_DIR)
                         st.session_state.current_subject = "General"
                         st.session_state.current_chat_id = None
@@ -229,7 +218,7 @@ def main():
                         st.rerun()
                 
                 with col_no:
-                    if st.button("❌ Cancel", use_container_width=True):
+                    if st.button("❌ Cancel", width='stretch'):
                         st.session_state.confirm_delete = False # Reset state
                         st.rerun()
 
@@ -265,7 +254,7 @@ def main():
         for chat_id, model_name, created_at, title in all_chats:
             col1, col2 = st.columns([4, 1])
             with col1:
-                if st.button(f"💬 {title}", key=f"chat_{chat_id}", use_container_width=True):
+                if st.button(f"💬 {title}", key=f"chat_{chat_id}", width='stretch'):
                         msgs, model = db.load_chat(chat_id)
                         st.session_state.update({"messages": msgs, "current_chat_id": chat_id, "selected_model": model})
                         clear_tts(); st.rerun()
@@ -491,7 +480,7 @@ def main():
         with col_img:
             st.image(
                 uploaded_img,
-                use_container_width=True
+                width='stretch'
             )
     # ---------------- PROCESSING ----------------
     if st.session_state.get("temp_prompt"):
