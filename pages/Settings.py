@@ -3,6 +3,8 @@ import ollama
 from time import sleep
 import os
 from dotenv import load_dotenv, set_key
+from openai import OpenAI
+from qdrant_client import QdrantClient
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -90,7 +92,6 @@ def main():
             error_found = False
             if new_qdrant_url and new_qdrant_key:
                 try:
-                    from qdrant_client import QdrantClient
                     test_q = QdrantClient(url=new_qdrant_url, api_key=new_qdrant_key, timeout=3)
                     test_q.get_collections()
                 except Exception as e:
@@ -99,7 +100,6 @@ def main():
 
             if new_openai:
                 try:
-                    from openai import OpenAI
                     test_oa = OpenAI(api_key=new_openai)
                     test_oa.models.list()
                 except Exception as e:
