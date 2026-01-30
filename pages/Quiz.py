@@ -123,7 +123,7 @@ index_path = os.path.join(subject_folder, f"index_{suffix}.faiss")
 if os.path.exists(index_path):
     st.success(f"✅ {suffix.upper()} Index found. Ready to generate.")
 else:
-    st.error(f"⚠️ Index missing. Please upload files and click 'Process RAG' below.")
+    st.error(f"⚠️ Please upload files and click 'Process RAG' below.")
 
 # ---------- SIDEBAR ----------
 with st.sidebar:
