@@ -1,3 +1,4 @@
+# modules/sqlite_db.py
 import json
 import sqlite3
 import os
@@ -6,16 +7,24 @@ import shutil
 from modules.quizstats.progress_store import clear_subject_stats
 
 def init_db_sqlite(db_file: str):
+    """
+    Initializes the application database with logical user isolation.
+    Note: Foreign Keys to 'users' are removed because user data lives in users.db.
+    """
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
+    
+    # Enable internal foreign keys for the messages -> chats relationship
     cursor.execute("PRAGMA foreign_keys = ON;")
 
-    # 1. SUBJECTS
+    # 1. SUBJECTS (user_id is a logical link to users.db)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subjects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            backend_type TEXT DEFAULT 'sqlite'
+            name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            backend_type TEXT DEFAULT 'sqlite',
+            UNIQUE(name, user_id)
         )
     """)
 
@@ -24,21 +33,14 @@ def init_db_sqlite(db_file: str):
         CREATE TABLE IF NOT EXISTS chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subject_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
             model_name TEXT,
             title TEXT DEFAULT 'New Chat',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (subject_name) REFERENCES subjects (name) ON DELETE CASCADE
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
-    # --- SCHEMA MIGRATION ---
-    # Ensures the 'title' column exists in older database files
-    cursor.execute("PRAGMA table_info(chats)")
-    columns = [column[1] for column in cursor.fetchall()]
-    if "title" not in columns:
-        cursor.execute("ALTER TABLE chats ADD COLUMN title TEXT DEFAULT 'New Chat'")
-
-    # 3. MESSAGES
+    # 3. MESSAGES (Internal foreign key is valid as both tables are in chat.db)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,56 +58,97 @@ def init_db_sqlite(db_file: str):
         CREATE TABLE IF NOT EXISTS rag_docs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subject_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
             file_name TEXT,
             content TEXT,
-            metadata TEXT,
-            FOREIGN KEY (subject_name) REFERENCES subjects (name) ON DELETE CASCADE
+            metadata TEXT
         )
     """)
+
+    # --- SCHEMA MIGRATIONS ---
+    # These ensure existing databases are updated without losing data
+    cursor.execute("PRAGMA table_info(chats)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if "title" not in columns:
+        cursor.execute("ALTER TABLE chats ADD COLUMN title TEXT DEFAULT 'New Chat'")
+    if "user_id" not in columns:
+        cursor.execute("ALTER TABLE chats ADD COLUMN user_id INTEGER")
+
+    cursor.execute("PRAGMA table_info(subjects)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if "user_id" not in columns:
+        cursor.execute("ALTER TABLE subjects ADD COLUMN user_id INTEGER")
+
+    cursor.execute("PRAGMA table_info(rag_docs)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if "user_id" not in columns:
+        cursor.execute("ALTER TABLE rag_docs ADD COLUMN user_id INTEGER")
+
+    # --- PERFORMANCE INDEXES ---
+    # Critical for fast lookups in a multi-user environment
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_subjects_user_id ON subjects(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chats_user_id ON chats(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_chats_subject ON chats(subject_name, user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rag_docs_user_id ON rag_docs(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_rag_docs_subject ON rag_docs(subject_name, user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id)")
+
     conn.commit()
     conn.close()
 
-def add_subject_sqlite(db_file, name, backend_type='sqlite'):
+def add_subject_sqlite(db_file, user_id, name, backend_type='sqlite'):
+    """Add a subject for a specific user"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO subjects (name, backend_type) VALUES (?, ?)", (name, backend_type))
+    cursor.execute("INSERT OR IGNORE INTO subjects (name, user_id, backend_type) VALUES (?, ?, ?)", 
+                   (name.lower(), user_id, backend_type))
     conn.commit()
     conn.close()
 
-def load_all_subjects_sqlite(db_file, backend_type='sqlite'):
+def load_all_subjects_sqlite(db_file, user_id, backend_type='sqlite'):
+    """Load all subjects for a specific user"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM subjects WHERE backend_type = ?", (backend_type,))
+    cursor.execute("SELECT name FROM subjects WHERE user_id = ? AND backend_type = ?", 
+                   (user_id, backend_type))
     rows = cursor.fetchall()
     conn.close()
     return [r[0] for r in rows]
 
-def create_new_chat_sqlite(db_file: str, subject_name: str, model_name: str):
+def create_new_chat_sqlite(db_file: str, user_id: int, subject_name: str, model_name: str):
+    """Create a new chat for a specific user"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO chats (subject_name, model_name) VALUES (?, ?)", (subject_name, model_name))
+    cursor.execute("INSERT INTO chats (subject_name, user_id, model_name) VALUES (?, ?, ?)", 
+                   (subject_name, user_id, model_name))
     chat_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return chat_id
 
-def update_chat_title_sqlite(db_file: str, chat_id: int, new_title: str):
+def update_chat_title_sqlite(db_file: str, chat_id: int, user_id: int, new_title: str):
+    """Update chat title (with user verification)"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("UPDATE chats SET title = ? WHERE id = ?", (new_title, chat_id))
+    cursor.execute("UPDATE chats SET title = ? WHERE id = ? AND user_id = ?", 
+                   (new_title, chat_id, user_id))
     conn.commit()
     conn.close()
 
-def load_all_chats_by_subject_sqlite(db_file: str, subject_name: str):
+def load_all_chats_by_subject_sqlite(db_file: str, user_id: int, subject_name: str):
+    """Load all chats for a specific user and subject"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    # Now includes 'title' for the sidebar
-    cursor.execute("SELECT id, model_name, created_at, title FROM chats WHERE subject_name = ? ORDER BY created_at DESC", (subject_name,))
+    cursor.execute(
+        "SELECT id, model_name, created_at, title FROM chats WHERE subject_name = ? AND user_id = ? ORDER BY created_at DESC", 
+        (subject_name, user_id)
+    )
     rows = cursor.fetchall()
     conn.close()
     return rows
 
 def add_message_sqlite(db_file: str, chat_id, role, content, used_rag=0):
+    """Add a message to a chat"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute(
@@ -115,79 +158,110 @@ def add_message_sqlite(db_file: str, chat_id, role, content, used_rag=0):
     conn.commit()
     conn.close()
 
-def load_chat_sqlite(db_file: str, chat_id):
+def load_chat_sqlite(db_file: str, chat_id: int, user_id: int):
+    """Load a chat (with user verification)"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
+    
+    cursor.execute("SELECT model_name FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id))
+    res = cursor.fetchone()
+    
+    if not res:
+        conn.close()
+        return [], None 
+    
+    model_name = res[0]
     cursor.execute("SELECT role, content, used_rag FROM messages WHERE chat_id = ? ORDER BY id ASC", (chat_id,))
     rows = cursor.fetchall()
-    cursor.execute("SELECT model_name FROM chats WHERE id = ?", (chat_id,))
-    res = cursor.fetchone()
-    model_name = res[0] if res else "Unknown"
     conn.close()
+    
     return [{"role": r, "content": c, "used_rag": ur} for r, c, ur in rows], model_name
 
-def add_rag_doc_sqlite(db_file, subject_name, file_name, content, metadata=None):
+def add_rag_doc_sqlite(db_file, user_id, subject_name, file_name, content, metadata=None):
+    """Add a RAG document for a specific user's subject"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     try:
-        # 1. Check for duplicates
-        cursor.execute("SELECT id FROM rag_docs WHERE subject_name = ? AND file_name = ?", (subject_name, file_name))
+        cursor.execute(
+            "SELECT id FROM rag_docs WHERE subject_name = ? AND user_id = ? AND file_name = ?", 
+            (subject_name, user_id, file_name)
+        )
         if cursor.fetchone(): 
             return False, f"{file_name} exists."    
-        # 2. Convert dictionary to JSON string so SQLite can save it
+        
         meta_str = json.dumps(metadata) if metadata else "{}"
-        # 3. Insert into the 4 columns
         cursor.execute(
-            "INSERT INTO rag_docs (subject_name, file_name, content, metadata) VALUES (?, ?, ?, ?)", 
-            (subject_name, file_name, content, meta_str)
+            "INSERT INTO rag_docs (subject_name, user_id, file_name, content, metadata) VALUES (?, ?, ?, ?, ?)", 
+            (subject_name, user_id, file_name, content, meta_str)
         )
         conn.commit()
         return True, "Success"
     finally: 
         conn.close()
 
-def get_subject_documents_sqlite(db_file: str, subject_name: str):
+def get_subject_documents_sqlite(db_file: str, user_id: int, subject_name: str):
+    """Get all documents for a specific user's subject"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("SELECT file_name FROM rag_docs WHERE subject_name = ?", (subject_name,))
+    cursor.execute("SELECT file_name FROM rag_docs WHERE subject_name = ? AND user_id = ?", 
+                   (subject_name, user_id))
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
 
-def file_exists_sqlite(db_file, subject, filename):
+def file_exists_sqlite(db_file, user_id, subject, filename):
+    """Check if file exists for a specific user's subject"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    query = "SELECT 1 FROM rag_docs WHERE subject_name = ? AND file_name = ? LIMIT 1"
-    cursor.execute(query, (subject, filename))
+    query = "SELECT 1 FROM rag_docs WHERE subject_name = ? AND user_id = ? AND file_name = ? LIMIT 1"
+    cursor.execute(query, (subject, user_id, filename))
     res = cursor.fetchone()
     conn.close()
     return res is not None
 
-def delete_chat_sqlite(db_file: str, chat_id: int):
+def delete_chat_sqlite(db_file: str, chat_id: int, user_id: int):
+    """Delete a chat (with user verification)"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+    cursor.execute("DELETE FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id))
     conn.commit()
     conn.close()
 
-def delete_subject_sqlite(db_file: str, subject_name: str, rag_index_dir: str = None):
+def delete_subject_sqlite(db_file: str, user_id: int, subject_name: str, rag_index_dir: str = None):
+    """Delete a subject (with user verification)"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     try:
-        cursor.execute("PRAGMA foreign_keys = ON;") 
-        cursor.execute("DELETE FROM subjects WHERE name = ?", (subject_name,))
+        # Manual deletion is required since cross-file ON DELETE CASCADE is impossible
+        cursor.execute("DELETE FROM subjects WHERE name = ? AND user_id = ?", (subject_name, user_id))
+        cursor.execute("DELETE FROM chats WHERE subject_name = ? AND user_id = ?", (subject_name, user_id))
+        cursor.execute("DELETE FROM rag_docs WHERE subject_name = ? AND user_id = ?", (subject_name, user_id))
         conn.commit()
     finally:
         conn.close()
+    
     try:
         clear_subject_stats(subject_name)
     except Exception as e:
         print(f"Error clearing statistics for {subject_name}: {e}")
 
     if rag_index_dir:
-        path = os.path.join(rag_index_dir, subject_name) 
+        # Isolated user path logic
+        path = os.path.join(rag_index_dir, f"user_{user_id}", subject_name) 
         if os.path.isdir(path):
             try:
                 shutil.rmtree(path)
             except Exception as e:
                 print(f"Error deleting folder {path}: {e}")
+
+def get_all_subject_docs_content_sqlite(db_file: str, user_id: int, subject_name: str):
+    """Get all document content for a subject (used by RAG)"""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT file_name, content, metadata FROM rag_docs WHERE subject_name = ? AND user_id = ?",
+        (subject_name, user_id)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"file_name": r[0], "content": r[1], "metadata": json.loads(r[2]) if r[2] else {}} for r in rows]

@@ -1,4 +1,4 @@
-# modules/file_utils.py
+# modules/quizstats/file_utils.py
 
 import os
 import json
@@ -24,24 +24,38 @@ PDF_EXTS = {".pdf", ".PDF"}
 
 # ------------ subject folder helpers ------------
 
-def ensure_subject_folders(subject_name: str):
+def ensure_subject_folders(subject_name: str, user_id: int = None):
     """
-    Ensure subjects/<subject_name>/raw exists.
+    Ensure subjects/user_X/<subject_name>/raw exists.
     All uploaded files (PDF, PPTX, DOCX, etc.) will be stored in this single folder.
     Returns the root path for that subject.
     """
-    root = os.path.join(SUBJECTS_DIR, subject_name)
+    if user_id is None:
+        # Try to get from session state
+        user_id = st.session_state.get("user_id")
+    
+    if user_id is not None:
+        # User-specific path
+        root = os.path.join(SUBJECTS_DIR, f"user_{user_id}", subject_name)
+    else:
+        # Fallback to old path (for backward compatibility)
+        root = os.path.join(SUBJECTS_DIR, subject_name)
+    
     raw = os.path.join(root, "raw")
     os.makedirs(raw, exist_ok=True)
     return root
 
 
-def save_uploaded_files(subject_name: str, files) -> List[str]:
+def save_uploaded_files(subject_name: str, files, user_id: int = None) -> List[str]:
     """
-    Saves uploaded files into subjects/<name>/raw (single folder for all types).
+    Saves uploaded files into subjects/user_X/<name>/raw (user-specific folder).
     Returns list of saved paths.
     """
-    root = ensure_subject_folders(subject_name)
+    if user_id is None:
+        # Try to get from session state
+        user_id = st.session_state.get("user_id")
+    
+    root = ensure_subject_folders(subject_name, user_id)
     raw_dir = os.path.join(root, "raw")
     os.makedirs(raw_dir, exist_ok=True)
 
@@ -115,8 +129,11 @@ def extract_text_from_path(file_path: str) -> str:
 
 # ------------ context search helpers ------------
 
-def _load_subject_index(subject_name: str) -> Dict[str, Any]:
-    root = ensure_subject_folders(subject_name)
+def _load_subject_index(subject_name: str, user_id: int = None) -> Dict[str, Any]:
+    if user_id is None:
+        user_id = st.session_state.get("user_id")
+    
+    root = ensure_subject_folders(subject_name, user_id)
     idx_path = os.path.join(root, "page_index.json")
     if not os.path.isfile(idx_path):
         return {"entries": []}
@@ -126,12 +143,15 @@ def _load_subject_index(subject_name: str) -> Dict[str, Any]:
     except Exception:
         return {"entries": []}
 
-def get_subject_index_entries(subject_name: str) -> List[Dict[str, Any]]:
+def get_subject_index_entries(subject_name: str, user_id: int = None) -> List[Dict[str, Any]]:
     """
     Public helper for quiz engine: return the raw index entries
     (pdf_page, pptx_slide, docx_chunk, etc.) for a subject.
     """
-    idx = _load_subject_index(subject_name)
+    if user_id is None:
+        user_id = st.session_state.get("user_id")
+    
+    idx = _load_subject_index(subject_name, user_id)
     return idx.get("entries", [])
 
 

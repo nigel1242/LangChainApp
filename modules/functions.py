@@ -98,33 +98,56 @@ def _pdf_page_texts_for_index(path: str) -> List[str]:
 
 # ----------------- RAG with FAISS (Local) -------------------
 
-def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollama_models, openai_models, suffix=""):
+def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollama_models, openai_models, suffix="", user_id=None):
+    """Rebuild FAISS index for a specific user's subject"""
     if target_name in _LOADED_FAISS_INDEXES:
         del _LOADED_FAISS_INDEXES[target_name]
         
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    # Pull text and filename from DB
-    cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
+    
+    # FIXED: Now filters by user_id
+    if user_id is not None:
+        cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ? AND user_id = ?", 
+                      (target_name, user_id))
+    else:
+        # Fallback for backward compatibility (should not happen with user isolation)
+        cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
+    
     rows = cursor.fetchall()
     conn.close()
     
-    if not rows: return
+    if not rows:
+        print(f"⚠️ No documents found in database for subject '{target_name}' (user_id={user_id})")
+        return
 
     all_docs = []
     splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
     
     for _, file_name in rows:
+        # The file_name in database should be the final PDF name
         raw_path = os.path.join(subject_dir, "raw", file_name)
+        
+        if not os.path.exists(raw_path):
+            print(f"⚠️ File not found: {raw_path}")
+            continue
+        
         ext = file_name.lower()
 
-        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
-
-        # ---------- PDF ----------
+        # ---------- PDF Processing ----------
         if ext.endswith(".pdf"):
             pages = _pdf_page_texts_for_index(raw_path)
+            
+            if not pages:
+                print(f"⚠️ No text extracted from {file_name}")
+                continue
+            
             for page_num, page_text in enumerate(pages, start=1):
-                for chunk_idx, chunk in enumerate(splitter.split_text(page_text), start=1):
+                if not page_text.strip():
+                    continue  # Skip empty pages
+                    
+                chunks = splitter.split_text(page_text)
+                for chunk_idx, chunk in enumerate(chunks, start=1):
                     all_docs.append(Document(
                         page_content=chunk,
                         metadata={
@@ -135,6 +158,16 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
                             "type": "pdf_page"
                         }
                     ))
+            
+            print(f"✅ Processed {file_name}: {len(pages)} pages")
+        else:
+            print(f"⚠️ Skipping unsupported file type: {file_name}")
+
+    if not all_docs:
+        print(f"⚠️ No documents could be processed for indexing (checked {len(rows)} files)")
+        return
+
+    print(f"📊 Total chunks for indexing: {len(all_docs)}")
 
     # 3. Embeddings & Saving
     if not suffix:
@@ -146,8 +179,11 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
         embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
 
     faiss_index = FAISS.from_documents(all_docs, embeddings)
+    
+    # Ensure directory exists
+    os.makedirs(subject_dir, exist_ok=True)
     faiss_index.save_local(folder_path=subject_dir, index_name=f"index_{suffix}")
-    print(f"✅ Rebuilt index_{suffix} with page/slide metadata.")
+    print(f"✅ Rebuilt index_{suffix} with {len(all_docs)} chunks from {len(rows)} files (user_id={user_id})")
 
 def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix=""):
     # 1. Determine index naming
@@ -177,21 +213,32 @@ def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name,
             allow_dangerous_deserialization=True
         )
         
-        # Perform the search ONCE
+        # Perform the search with scores
         docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
         
+        # RELEVANCE FILTERING - Lower score = more similar (L2 distance)
+        # Threshold depends on your embedding model, adjust if needed
+        RELEVANCE_THRESHOLD = 1.5  # Tune this value (0.5-1.5 typical range)
+        
+        filtered_docs = [(doc, score) for doc, score in docs_with_scores if score < RELEVANCE_THRESHOLD]
+        
+        if not filtered_docs:
+            print(f"⚠️ No relevant docs found (all scores > {RELEVANCE_THRESHOLD})")
+            print(f"Closest match had score: {docs_with_scores[0][1]:.3f}")
+            return "", [], False  # No relevant context found
+        
         # Extract documents and build context
-        docs = [d for d, score in docs_with_scores]
+        docs = [d for d, score in filtered_docs]
         context = "\n\n".join([d.page_content for d in docs])
         
         # --- DEBUG SECTION ---
-        # We use the existing docs_with_scores from the search above
-        for i, (doc, score) in enumerate(docs_with_scores):
-            print(f"--- Result {i} ---")
+        print(f"\n📚 Found {len(filtered_docs)} relevant results (threshold: {RELEVANCE_THRESHOLD})")
+        for i, (doc, score) in enumerate(filtered_docs):
+            print(f"--- Result {i} (Score: {score:.3f}) ---")
             print(f"File: {doc.metadata.get('file')}")
             print(f"Slide: {doc.metadata.get('slide')}")
             print(f"Page: {doc.metadata.get('page')}")
-            snippet = doc.page_content[:50].replace("\n", " ")
+            snippet = doc.page_content[:80].replace("\n", " ")
             print(f"Text Snippet: {snippet}...")
         
         return context, docs, True
@@ -199,13 +246,21 @@ def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name,
     except Exception as e:
         print(f"Error loading or searching FAISS: {e}")
         return "", [], False
+
 # ----------------- RAG with Qdrant (Remote) -------------------
 
-def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollama_models, openai_models, qdrant_api_key=None):
-    # This remains as a sync helper if you need to bulk-re-upload
+def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollama_models, openai_models, qdrant_api_key=None, user_id=None):
+    """Rebuild Qdrant index for a specific user's subject"""
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
+    
+    # FIXED: Now filters by user_id
+    if user_id is not None:
+        cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ? AND user_id = ?", 
+                      (target_name, user_id))
+    else:
+        cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
+    
     rows = cursor.fetchall()
     conn.close()
     
@@ -222,9 +277,6 @@ def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollam
         splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = splitter.split_text(content)
         collection_name = f"rag_docs_{len(embeddings.embed_query('test'))}"
-        
-        # Note: Actual ingestion logic is usually handled by db.add_rag_doc 
-        # but this ensures the collection is structured for the subject
         pass
 
 def get_relevant_rag_qdrant(db_file, qdrant_url, target_id, query, model_name, ollama_models, openai_models, top_k=3, qdrant_api_key=None):
@@ -288,11 +340,12 @@ def generate_chat_title(first_message: str, model_name: str, openai_client=None)
 
 # ----------------- Unified Dispatchers -------------------
 
-def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):
+def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix="", user_id=None):
+    """Unified dispatcher for rebuilding RAG index (FAISS or Qdrant)"""
     if vector_db == "faiss":
-        rebuild_rag_index_faiss(db_file, rag_index_dir, target_id, model_name, ollama_models, openai_models, suffix)
+        rebuild_rag_index_faiss(db_file, rag_index_dir, target_id, model_name, ollama_models, openai_models, suffix, user_id=user_id)
     elif vector_db == "qdrant":
-        rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key)
+        rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key, user_id=user_id)
 
 def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):
     if vector_db == "faiss":

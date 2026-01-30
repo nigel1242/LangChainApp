@@ -1,4 +1,4 @@
-# app.py
+# Chat.py
 from __future__ import annotations
 import os
 import re
@@ -57,12 +57,8 @@ def main():
      
     def format_latex(text: str) -> str:
         """Converts common LLM LaTeX delimiters to Streamlit-friendly ones."""
-        # Convert \[ ... \] to $$ ... $$ for block math
         text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
-        # Convert \( ... \) to $ ... $ for inline math
         text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
-        # Sometimes models use [ ] or ( ) without backslashes
-        # Only use these if you notice the model consistently failing backslashes
         return text
 
     # 1. AUTHENTICATION (Always first)
@@ -72,7 +68,14 @@ def main():
         login_page()
         st.stop()
 
-    # 2. DEFINE CONFIGURATION VARIABLES FIRST
+    # 2. GET USER ID FROM SESSION
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        st.error("⚠️ User ID not found in session. Please login again.")
+        logout()
+        st.stop()
+
+    # 3. DEFINE CONFIGURATION VARIABLES
     q_url = os.getenv("QDRANT_URL", "").strip()
     q_key = os.getenv("QDRANT_API_KEY", "").strip()
     oa_key = st.session_state.get("openai_api_key", os.getenv("OPENAI_API_KEY", "")).strip()
@@ -87,7 +90,6 @@ def main():
             lock_ui = True
         else:
             try:
-                # 3-second timeout for quick validation
                 test_client = QdrantClient(url=q_url, api_key=q_key, timeout=3)
                 test_client.get_collections()
             except Exception:
@@ -96,14 +98,12 @@ def main():
     # Perform OpenAI key validation
     openai_functional = False
     if oa_key:
-        # Instead of a full model list check (which is slow), 
-        # just trust the key presence if it was already validated in Settings.
         openai_functional = True 
 
-    # Update session state so the rest of the app knows the status
+    # Update session state
     st.session_state.openai_api_key = oa_key
 
-    # 3. INITIALIZE QDRANT CLIENT (Now safe because variables are defined)
+    # 4. INITIALIZE QDRANT CLIENT
     if "qdrant_client" not in st.session_state and using_qdrant and not lock_ui:
         st.session_state.qdrant_client = QdrantClient(
             url=q_url, 
@@ -111,7 +111,7 @@ def main():
             timeout=10 
         )
 
-    # 4. SET SESSION STATE DEFAULTS
+    # 5. SET SESSION STATE DEFAULTS
     defaults = {
         "current_subject": "General",
         "messages": [],
@@ -137,7 +137,7 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = val
 
-    # 5. MAIN APP INTERFACE
+    # 6. MAIN APP INTERFACE
     st.title("📖 My Learning AI")
 
     if lock_ui:
@@ -146,20 +146,31 @@ def main():
     if not openai_functional:
         st.toast("**Warning:** OpenAI features are limited.", icon="⚠️")
 
-    # Initialize DB Manager based on current settings
+    # 7. INITIALIZE DB MANAGER WITH USER_ID
     db = None
     if using_qdrant and not lock_ui:
         try:
             active_backend = st.session_state.chat_backend
-            db = DBManager(backend=active_backend, db_file=CHAT_DB_FILE, qdrant_url=q_url, qdrant_api_key=q_key)
+            db = DBManager(
+                backend=active_backend, 
+                user_id=user_id,  # ← Added user_id
+                db_file=CHAT_DB_FILE, 
+                qdrant_url=q_url, 
+                qdrant_api_key=q_key
+            )
         except Exception as e:
             lock_ui = True
             st.error(f"⚠️ Qdrant Connection Failed: {e}")
                 
     if db is None:
-        db = DBManager(backend="sqlite", db_file=CHAT_DB_FILE)
+        db = DBManager(
+            backend="sqlite", 
+            user_id=user_id,  # ← Added user_id
+            db_file=CHAT_DB_FILE
+        )
 
     subjects = db.load_all_subjects()
+    
     # ---------------- SIDEBAR ----------------
     with st.sidebar:
         st.markdown(f"**User: {username}**")
@@ -197,29 +208,29 @@ def main():
                 st.rerun()
 
         if selected_sub != "General":
-            # 1. The initial "Delete" button
-            if st.button(f"🗑️ Delete {selected_sub}", type="primary", width='stretch'):
+            if st.button(f"🗑️ Delete {selected_sub}", type="primary", use_container_width=True):
                 st.session_state.confirm_delete = True
 
-            # 2. The Confirmation UI
             if st.session_state.get("confirm_delete"):
                 st.warning(f"⚠️ Are you sure? This will permanently delete all chats and RAG data for **{selected_sub}**.")
                 
                 col_yes, col_no = st.columns(2)
                 
                 with col_yes:
-                    if st.button("✅ Yes, Delete", type="primary", width='stretch'):
-                        db.delete_subject(selected_sub, rag_index_dir=SUBJECTS_DIR)
+                    if st.button("✅ Yes, Delete", type="primary", use_container_width=True):
+                        # Use user-specific path
+                        user_subjects_dir = os.path.join(SUBJECTS_DIR, f"user_{user_id}")
+                        db.delete_subject(selected_sub, rag_index_dir=user_subjects_dir)
                         st.session_state.current_subject = "General"
                         st.session_state.current_chat_id = None
                         st.session_state.messages = []
-                        st.session_state.confirm_delete = False # Reset state
+                        st.session_state.confirm_delete = False
                         st.success(f"Subject '{selected_sub}' deleted.")
                         st.rerun()
                 
                 with col_no:
-                    if st.button("❌ Cancel", width='stretch'):
-                        st.session_state.confirm_delete = False # Reset state
+                    if st.button("❌ Cancel", use_container_width=True):
+                        st.session_state.confirm_delete = False
                         st.rerun()
 
         st.markdown("---")
@@ -243,9 +254,9 @@ def main():
         all_chats = []
         if not lock_ui:
             try:
-                all_chats = db.load_all_chats(st.session_state.current_subject)
-            except Exception:
-                st.warning("⚠️ Could not load remote chats. Check your Qdrant URL.")
+                all_chats = db.load_all_chats_by_subject(st.session_state.current_subject)
+            except Exception as e:
+                st.warning(f"⚠️ Could not load chats: {e}")
 
         if st.button("🆕 Start New Chat", disabled=lock_ui):
             st.session_state.update({"messages": [], "current_chat_id": None})
@@ -254,19 +265,19 @@ def main():
         for chat_id, model_name, created_at, title in all_chats:
             col1, col2 = st.columns([4, 1])
             with col1:
-                if st.button(f"💬 {title}", key=f"chat_{chat_id}", width='stretch'):
-                        msgs, model = db.load_chat(chat_id)
-                        st.session_state.update({"messages": msgs, "current_chat_id": chat_id, "selected_model": model})
-                        clear_tts(); st.rerun()
+                if st.button(f"💬 {title}", key=f"chat_{chat_id}", use_container_width=True):
+                    msgs, model = db.load_chat(chat_id)
+                    st.session_state.update({"messages": msgs, "current_chat_id": chat_id, "selected_model": model})
+                    clear_tts(); st.rerun()
             with col2:
                 if st.button("✕", key=f"del_{chat_id}"):
-                        db.delete_chat(chat_id)
-                        if st.session_state.get("current_chat_id") == chat_id:
-                            st.session_state.messages = []
-                            st.session_state.current_chat_id = None
-                            st.session_state.last_assistant_text = ""
-                            clear_tts()
-                        st.rerun()
+                    db.delete_chat(chat_id)
+                    if st.session_state.get("current_chat_id") == chat_id:
+                        st.session_state.messages = []
+                        st.session_state.current_chat_id = None
+                        st.session_state.last_assistant_text = ""
+                        clear_tts()
+                    st.rerun()
 
     # ---------------- MODELS ----------------
     MODEL_MAP = {
@@ -313,40 +324,38 @@ def main():
                 target_sub = st.session_state.current_subject
                 
                 if uploaded_files:
-                    raw_dir = os.path.join("modules", "subjects", target_sub, "raw")
+                    # Use user-specific directory
+                    raw_dir = os.path.join("modules", "subjects", f"user_{user_id}", target_sub, "raw")
                     os.makedirs(raw_dir, exist_ok=True)
                     existing_filenames = os.listdir(raw_dir)
                     
-                    # Availability Flags
                     use_openai = bool(st.session_state.openai_api_key)
                     use_ollama = True 
 
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    msg_placeholder = st.empty() # For duplicate alerts
+                    msg_placeholder = st.empty()
                     
                     qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
                     for i, f in enumerate(uploaded_files):
-                        # Update Progress
                         percent_val = (i + 1) / len(uploaded_files)
                         progress_bar.progress(percent_val)
                         
-                        # --- DUPLICATE CHECK ---
                         if f.name in existing_filenames:
                             msg_placeholder.warning(f"⚠️ {f.name} already exists. Skipping...")
-                            time.sleep(1.5) # Brief pause so user can read it
+                            time.sleep(1.5)
                             msg_placeholder.empty()
                             continue 
 
-                        # --- NEW FILE PROCESSING ---
                         status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
                         
                         f.seek(0)
+                        # Save to user-specific directory
                         save_uploaded_files(target_sub, [f])
-                        original_path = os.path.join(raw_dir, f.name)
+                        # Use user-specific path for processing
+                        original_path = os.path.join("modules", "subjects", f"user_{user_id}", target_sub, "raw", f.name)
                         
-                        # Convert PPTX/DOCX to PDF
                         ext = f.name.split('.')[-1].lower()
                         final_path = original_path
                         if ext in ["pptx", "docx"]:
@@ -359,7 +368,6 @@ def main():
                         content = extract_text_from_path(final_path)
                         final_filename = os.path.basename(final_path)
 
-                        # --- PATH A: FAISS ---
                         if st.session_state.vector_db == "faiss":
                             if use_ollama:
                                 db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
@@ -368,7 +376,6 @@ def main():
                                 db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
                                             content=content, metadata={"engine": "openai"})
 
-                        # --- PATH B: QDRANT ---
                         elif st.session_state.vector_db == "qdrant":
                             chunks = qdrant_splitter.split_text(content)
                             for chunk_text in chunks:
@@ -386,17 +393,17 @@ def main():
                                                 content=chunk_text, vector_data=v_openai,
                                                 metadata={"engine": "openai"})
 
-                    # --- FINAL FAISS SYNC ---
                     if st.session_state.vector_db == "faiss":
-                        subject_path = os.path.join(SUBJECTS_DIR, target_sub)
+                        # Use user-specific path
+                        subject_path = os.path.join(SUBJECTS_DIR, f"user_{user_id}", target_sub)
                         if use_ollama:
                             status_text.text("🔄 Rebuilding Ollama FAISS index...")
                             rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
-                                            ollama_models, openai_models, suffix="ollama")
+                                            ollama_models, openai_models, suffix="ollama", user_id=user_id)
                         if use_openai:
                             status_text.text("🔄 Rebuilding OpenAI FAISS index...")
                             rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
-                                            ollama_models, openai_models, suffix="openai")
+                                            ollama_models, openai_models, suffix="openai", user_id=user_id)
 
                     st.success(f"✅ Knowledge Base Processed!")
                     time.sleep(2)
@@ -406,21 +413,28 @@ def main():
     message_container = st.container(height=500)
     for msg in st.session_state.messages:
         with message_container.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else "😎"):
-            st.markdown(("📄 " if msg.get("used_rag") else "") + msg["content"])
+            # Show RAG indicator if used
+            rag_indicator = "📄 " if msg.get("used_rag") else ""
+            st.markdown(rag_indicator + msg["content"])
             
-            # New: Display Source Images
             if msg.get("sources"):
-                with st.expander("🔍 View Source Material"):
-                    cols = st.columns(len(msg["sources"]))
+                with st.expander(f"🔍 View Source Material ({len(msg['sources'])} sources)"):
+                    st.caption("📚 Information retrieved from these documents:")
+                    cols = st.columns(min(len(msg["sources"]), 3))  # Max 3 columns
                     for i, source in enumerate(msg["sources"]):
                         f_name = source.get("file")
                         page_num = source.get("page", 1)
-                        pdf_path = os.path.join(SUBJECTS_DIR, st.session_state.current_subject, "raw", f_name)
+                        # Use user-specific path
+                        pdf_path = os.path.join(SUBJECTS_DIR, f"user_{user_id}", st.session_state.current_subject, "raw", f_name)
                         
-                        if os.path.exists(pdf_path):
-                            img = render_pdf_page_image(pdf_path, page_num)
-                            if img:
-                                cols[i].image(img, caption=f"{f_name} (p. {page_num})")
+                        col_idx = i % 3  # Cycle through columns
+                        with cols[col_idx]:
+                            if os.path.exists(pdf_path):
+                                img = render_pdf_page_image(pdf_path, page_num)
+                                if img:
+                                    st.image(img, caption=f"{f_name} (p. {page_num})", use_container_width=True)
+                            else:
+                                st.warning(f"📄 {f_name} (p. {page_num})\n*Preview unavailable*")
 
     # ---------------- TTS CONTROLS ----------------
     latest_a = st.session_state.get("last_assistant_text", "").strip()
@@ -428,18 +442,17 @@ def main():
 
     if latest_a:
         if not has_audio:
-                if st.button("🔊 Listen", disabled=not openai_functional):
-                    with st.spinner("..."):
-                            client = get_openai_client()
-                            st.session_state.tts_audio_bytes = speak_text(latest_a, client, st.session_state.tts_voice)
-                            st.session_state.tts_audio_for = latest_a
-                            st.rerun()
+            if st.button("🔊 Listen", disabled=not openai_functional):
+                with st.spinner("..."):
+                    client = get_openai_client()
+                    st.session_state.tts_audio_bytes = speak_text(latest_a, client, st.session_state.tts_voice)
+                    st.session_state.tts_audio_for = latest_a
+                    st.rerun()
         if has_audio:
-                st.audio(st.session_state.tts_audio_bytes, format="audio/mp3")
+            st.audio(st.session_state.tts_audio_bytes, format="audio/mp3")
 
     # ---------------- INPUT ROW ----------------
     st.markdown("### Enter your prompt")
-    # Logic to detect if the current model supports vision
     is_vision_model = any(v in st.session_state.selected_model.lower() for v in ["llava", "qwen", "gpt-4o"])
 
     uploaded_img = None
@@ -474,31 +487,26 @@ def main():
         )
 
     if uploaded_img is not None:
-        # Update the session state with the current image bytes
         st.session_state.vision_images = [uploaded_img.getvalue()]
         col_img, _ = st.columns([1, 3]) 
         with col_img:
-            st.image(
-                uploaded_img,
-                width='stretch'
-            )
+            st.image(uploaded_img, use_container_width=True)
+            
     # ---------------- PROCESSING ----------------
     if st.session_state.get("temp_prompt"):
         user_p = st.session_state.temp_prompt
         st.session_state.temp_prompt = None
         
-        # Ensure Chat Session exists
         if st.session_state.current_chat_id is None:
             st.session_state.current_chat_id = db.create_new_chat(
-                st.session_state.selected_model,
-                st.session_state.current_subject
+                st.session_state.current_subject,
+                st.session_state.selected_model
             )
         
         chat_id = st.session_state.current_chat_id
         db.add_message(chat_id, "user", user_p)
         st.session_state.messages.append({"role": "user", "content": user_p})
 
-        # Generate Title for new chats
         if len(st.session_state.messages) <= 1:
             client_openai = get_openai_client() if "gpt" in st.session_state.selected_model else None
             new_title = generate_chat_title(user_p, st.session_state.selected_model, client_openai)
@@ -507,13 +515,12 @@ def main():
         with message_container.chat_message("user", avatar="😎"):
             st.markdown(user_p)
 
-        # --- SYNCED RAG SEARCH ---
+        # --- RAG SEARCH ---
         rag_content, raw_docs, has_docs = "", [], False
         sources_to_display = []
         search_id = st.session_state.current_subject
         
         if st.session_state.rag_enabled:
-            # RAG Search Logic (Qdrant or FAISS)
             if st.session_state.vector_db == "qdrant":
                 try:
                     with st.spinner("🔍 Searching Knowledge Base (Qdrant)..."):
@@ -527,7 +534,8 @@ def main():
                 except Exception as e: 
                     st.error(f"Qdrant RAG Error: {e}")
             elif st.session_state.vector_db == "faiss":
-                subject_index_dir = os.path.join(SUBJECTS_DIR, search_id)
+                # Use user-specific path
+                subject_index_dir = os.path.join(SUBJECTS_DIR, f"user_{user_id}", search_id)
                 with st.spinner("🔍 Searching Knowledge Base (FAISS)..."):
                     rag_content, raw_docs, has_docs = get_relevant_rag(
                         CHAT_DB_FILE, subject_index_dir, search_id, user_p,
@@ -539,15 +547,13 @@ def main():
                 has_docs = True
                 seen = set()
                 for doc in raw_docs:
-                    # Determine if we are dealing with a Qdrant ScoredPoint or a LangChain Document
                     if hasattr(doc, "payload"):
-                        m = doc.payload # Qdrant uses payload
+                        m = doc.payload
                     elif hasattr(doc, "metadata"):
-                        m = doc.metadata # FAISS uses metadata
+                        m = doc.metadata
                     else:
                         m = {}
 
-                    # ALL logic using 'm' MUST be indented inside this loop
                     f_name = m.get('file') or m.get('file_name') 
                     p_num = m.get('page', 1)
                     
@@ -555,18 +561,39 @@ def main():
                     if f_name and identifier not in seen:
                         sources_to_display.append({"file": f_name, "page": p_num})
                         seen.add(identifier)
+                
+                # Add info message if RAG found results
+                if sources_to_display:
+                    print(f"✅ RAG: Found {len(sources_to_display)} unique source pages")
+            else:
+                print("⚠️ RAG: No documents returned from search")
 
         # --- CONSTRUCT PROMPT ---
         if has_docs and rag_content.strip():
             indicator = "📄 "
-            enhanced_p = f"You are a helpful assistant. Context:\n{rag_content}\n\nQuestion: {user_p}"
+            enhanced_p = f"""You are a helpful assistant with access to specific reference documents.
+
+GUIDELINES:
+1. Prioritize the information in the documents below.
+2. If the documents are slightly related but don't give a full answer, use them as a primary source and supplement with general knowledge, but clearly state what comes from the documents.
+3. If the documents are completely unrelated to the topic, let the user know by saying "I am unable to find the information based on the documents uploaded." and try to be helpful.
+4. If the user uses shorthand (like "linear ode" for "linear ordinary differential equation"), interpret their intent based on the document context.
+
+REFERENCE DOCUMENTS:
+{rag_content}
+
+REFERENCE DOCUMENTS:
+{rag_content}
+
+USER QUESTION: {user_p}
+
+Your answer (based STRICTLY on the documents above):"""
         else:
             indicator = ""
             enhanced_p = user_p
 
         # --- LLM CALL ---
         if st.session_state.selected_model in ollama_models:
-            # Only send images if there is a fresh upload
             images_to_send = [get_b64_image(img_data) for img_data in st.session_state.vision_images] \
                                     if st.session_state.vision_images else None
 
@@ -574,12 +601,10 @@ def main():
                 stream_placeholder = st.empty()
                 full_res = ""
 
-                # Build the message dict
                 user_message = {"role": "user", "content": enhanced_p}
                 if images_to_send:
                     user_message["images"] = images_to_send
 
-                # Pass to Ollama
                 for chunk in ollama.chat(
                     model=st.session_state.selected_model,
                     stream=True,
@@ -588,7 +613,6 @@ def main():
                     full_res += chunk.get("message", {}).get("content", "")
                     stream_placeholder.markdown(indicator + format_latex(full_res))
 
-                # Save completion
                 process_assistant_completion(chat_id, format_latex(full_res), has_docs, sources=sources_to_display)
 
         elif st.session_state.selected_model in openai_models:
@@ -597,10 +621,8 @@ def main():
                 stream_placeholder = st.empty()
                 full_res = ""
 
-                # Prepare history
                 history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
 
-                # Build current turn content
                 if st.session_state.vision_images:
                     current_turn_content = [{"type": "text", "text": enhanced_p}]
                     for img_bytes in st.session_state.vision_images:
@@ -614,10 +636,8 @@ def main():
                         })
                     history.append({"role": "user", "content": current_turn_content})
                 else:
-                    # Text-only turn
                     history.append({"role": "user", "content": enhanced_p})
 
-                # Stream from OpenAI
                 try:
                     stream = client.chat.completions.create(
                         model=st.session_state.selected_model,
@@ -631,8 +651,7 @@ def main():
                 except Exception as e:
                     st.error(f"OpenAI Error: {e}")
 
-                # Save completion
                 process_assistant_completion(chat_id, format_latex(full_res), has_docs, sources=sources_to_display)
 
 if __name__ == "__main__":
-      main()
+    main()
