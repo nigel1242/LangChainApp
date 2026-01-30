@@ -1,4 +1,5 @@
 from __future__ import annotations
+import concurrent.futures
 import os
 import time
 from pathlib import Path
@@ -241,18 +242,52 @@ if st.button("🎲 Generate 10 Questions"):
     if not os.path.exists(index_path):
         st.error("Please Process & Sync files first.")
     else:
-        with st.spinner("🧠 Analyzing Knowledge Base..."):
-            quiz = build_quiz_from_rag(
+        # 1. Create side-by-side placeholders for status and timer
+        colA, colB = st.columns([3, 1])
+        with colA:
+            status_ph = st.empty()
+        with colB:
+            timer_ph = st.empty()
+
+        status_ph.info("🧠 Analyzing Knowledge Base...")
+        start = time.perf_counter() # Start the clock
+
+        quiz = None
+        err = None
+
+        # 2. Run the blocking LLM function in a background thread
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                build_quiz_from_rag,
                 subject=S["selected_subject"],
                 model_name=st.session_state.selected_model,
                 n_questions=10,
-                vector_db="faiss"
+                vector_db="faiss",
             )
-            if quiz:
-                S.update({"quiz": quiz, "current_idx": 0, "score": 0, "submitted": {}})
-                st.rerun()
-            else:
-                st.error("Failed to generate questions. Try a different model.")
+
+            # 3. LIVE TIMER LOOP: Updates UI while background thread works
+            while not future.done():
+                elapsed = time.perf_counter() - start
+                timer_ph.metric("Load time", f"{elapsed:0.1f}s")
+                time.sleep(0.1) # Frequency of UI refresh
+
+            try:
+                quiz = future.result() # Collect the generated quiz
+            except Exception as e:
+                err = e
+
+        # 4. Clean up UI after completion
+        elapsed = time.perf_counter() - start
+        timer_ph.metric("Load time", f"{elapsed:0.1f}s", "done")
+        status_ph.empty()
+
+        if err:
+            st.error(f"Quiz generation crashed: {err}")
+        elif quiz:
+            S.update({"quiz": quiz, "current_idx": 0, "score": 0, "submitted": {}})
+            st.rerun()
+        else:
+            st.error("Failed to generate questions. Try a different model.")
 
 # ---------- QUIZ PLAYER ----------
 if S["quiz"]:

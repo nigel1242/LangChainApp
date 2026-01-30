@@ -105,18 +105,22 @@ db = init_page()
 # ------------------ SUBJECT SELECTION ------------------
 st.title("📊 Progress & Statistics")
 
-subject_names = db.load_all_subjects()
-if subject_names is None:
-    subject_names = []
-if not subject_names:
-    subject_names = ["General"]
+# ✅ FILTER OUT "General" from selectable subjects
+subject_names = [s for s in (db.load_all_subjects() or []) if s != "General"]
 
-current_default = st.session_state.get("current_subject", subject_names[0])
+if not subject_names:
+    st.warning("⚠️ No subjects found (excluding 'General'). Create a subject in the main app first.")
+    st.stop()
+
+# If current_subject is missing/invalid/General, default to first real subject
+current_default = st.session_state.get("current_subject")
+if not current_default or current_default == "General" or current_default not in subject_names:
+    current_default = subject_names[0]
 
 selected_subject = st.selectbox(
     "📚 Select Subject to Analyze",
     subject_names,
-    index=subject_names.index(current_default) if current_default in subject_names else 0,
+    index=subject_names.index(current_default),
 )
 
 if selected_subject != st.session_state.get("current_subject"):
@@ -243,7 +247,7 @@ st.dataframe(topic_stats.sort_values("Accuracy %"), use_container_width=True, hi
 # ------------------ ATTEMPT HISTORY ------------------
 st.subheader("🧾 Score History")
 history = df_scope.groupby("attempt_id").agg(
-    Start=("datetime", "min"),
+    Date=("datetime", "min"),
     Questions=("question", "count"),
     Correct=("correct_bool", "sum"),
 ).reset_index()
@@ -265,7 +269,7 @@ else:
         mistakes[view_cols].rename(
             columns={
                 "datetime": "Time",
-                "attempt_id": "Att#",
+                "attempt_id": "Attempt ",
                 "chosen": "Your Answer",
                 "correct": "Correct Answer",
             }

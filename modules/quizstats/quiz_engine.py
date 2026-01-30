@@ -12,22 +12,10 @@ from openai import OpenAI
 
 # NEW: use the subject index so we know which slide/page a question came from
 from modules.quizstats.file_utils import get_subject_index_entries
-
-
-# -------------------------------------------------------------
-#   OLLAMA/OPENAI CLIENT HANDLING
-# -------------------------------------------------------------
-def _get_openai_client() -> OpenAI | None:
-    """Gets the OpenAI client if the API key is available."""
-    key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not key:
-        return None
-    return OpenAI(api_key=key)
-
+from modules.functions import get_openai_client
 
 # -------------------------------------------------------------
-#   QUALITY HELPERS (Blueprint + Verify)
-#   (kept in this same file; no extra engine)
+#   QUALITY HELPERS
 # -------------------------------------------------------------
 def _extract_json_block(raw: str) -> dict | None:
     if not raw:
@@ -45,20 +33,30 @@ def _norm_q(q: str) -> str:
     return re.sub(r"\s+", " ", (q or "").strip().lower())
 
 
-def _normalize_choices(choices: List[str]) -> List[str]:
-    """Ensure exactly 4 choices and A)/B)/C)/D) prefixes."""
+def _strip_choice_label(s: str) -> str:
+    return re.sub(r"^[ABCD]\s*[\)\.\-:]\s*", "", (s or "").strip(), flags=re.IGNORECASE)
+
+
+def _normalize_choices_keep_text_only(choices: List[str]) -> List[str]:
+    """
+    Returns 4 choices WITHOUT forcing A)/B)/C)/D) prefixes.
+    We'll add labels later after balancing, so labels don't bias anything.
+    """
     clean = [str(c).strip() for c in (choices or []) if str(c).strip()]
     if len(clean) < 4:
         return []
-    clean = clean[:4]
+    # strip any existing A/B/C/D label the model included
+    clean = [_strip_choice_label(c) for c in clean]
+    return clean[:4]
+
+
+def _apply_choice_labels(choices: List[str]) -> List[str]:
     labels = ["A) ", "B) ", "C) ", "D) "]
-    normalized: List[str] = []
-    for label, choice in zip(labels, clean):
-        c = choice
-        if not c.startswith(label):
-            c = f"{label}{c.lstrip('ABCD). ').strip()}"
-        normalized.append(c)
-    return normalized
+    out = []
+    for lab, c in zip(labels, choices):
+        c2 = _strip_choice_label(c)
+        out.append(f"{lab}{c2}")
+    return out
 
 
 def _normalize_math_text(text: str) -> str:
@@ -124,7 +122,7 @@ def _llm_json(model_name: str, system: str, user: str) -> dict | None:
     is_openai_model = "gpt" in (model_name or "").lower()
 
     if is_openai_model:
-        client = _get_openai_client()
+        client = get_openai_client()
         if client is None:
             return None
         try:
@@ -150,7 +148,8 @@ def _llm_json(model_name: str, system: str, user: str) -> dict | None:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            options={"temperature": 0.2, "num_predict": 2048},
+            # SPEED: lower generation budget
+            options={"temperature": 0.2, "num_predict": 900},
             format="json",
         )
         raw = resp["message"]["content"]
@@ -231,6 +230,59 @@ Rules:
 - If minor issues exist (format, answer_index mismatch), fix it in 'fixed'.
 - If unsupported/hallucinated, ok=false.
 """
+
+
+# -------------------------------------------------------------
+#   CHOICE DIVERSITY FIX (REMOVE "A BIAS" + DUPLICATE HAZARDS)
+# -------------------------------------------------------------
+def _rebalance_answer_positions(quiz: List[Dict[str, Any]], seed: int | None = None) -> List[Dict[str, Any]]:
+    """
+    Ensures the correct answer is not disproportionately A/B/C/D.
+    Also avoids 'first duplicate wins' issues by re-shuffling distractors.
+    """
+    rng = random.Random(seed)
+    counts = [0, 0, 0, 0]
+
+    for q in quiz:
+        choices = list(q.get("choices") or [])
+        ans = q.get("answer_idx", None)
+        if not isinstance(choices, list) or len(choices) != 4:
+            continue
+        if not isinstance(ans, int) or not (0 <= ans <= 3):
+            continue
+
+        correct = choices[ans]
+        distractors = [c for i, c in enumerate(choices) if i != ans]
+        rng.shuffle(distractors)
+
+        min_count = min(counts)
+        candidates = [i for i, c in enumerate(counts) if c == min_count]
+        target = rng.choice(candidates)
+
+        new_choices = [None] * 4
+        new_choices[target] = correct
+
+        di = 0
+        for i in range(4):
+            if new_choices[i] is None:
+                new_choices[i] = distractors[di]
+                di += 1
+
+        q["choices"] = new_choices
+        q["answer_idx"] = target
+        counts[target] += 1
+
+    return quiz
+
+
+def _has_duplicate_choices(choices: List[str]) -> bool:
+    """
+    Reject duplicates (or near-identical) choices.
+    This prevents bugs where .index() would pick the first match (often A).
+    """
+    plain = [_strip_choice_label(c) for c in (choices or [])]
+    norm = [re.sub(r"\s+", " ", p.lower()).strip() for p in plain if p.strip()]
+    return len(norm) != 4 or len(set(norm)) != 4
 
 
 # -------------------------------------------------------------
@@ -316,13 +368,14 @@ def _get_unified_system_msg():
         "RULES:\n"
         "1) Use ONLY what is explicitly present in <notes>. No outside knowledge.\n"
         "2) Create exactly 1 question and exactly 4 distinct options.\n"
-        "3) Choices MUST be prefixed 'A) ', 'B) ', 'C) ', 'D) '.\n"
+        "3) Choices MUST be 4 distinct answers (labels optional; we will label later).\n"
         "4) Ensure answer_index is correct (0=A, 1=B, 2=C, 3=D) OR use A/B/C/D.\n"
         "5) Explanation MUST include:\n"
         "   - a short direct quote from the notes AND\n"
         "   - 1–2 sentences of reasoning/inference/calculation (not just restating)\n"
         "6) Use LaTeX for math ($...$) and escape backslashes (\\\\).\n"
         "7) If the content is mathematical, include LaTeX in BOTH the question and the choices.\n"
+        "8) Randomize which option is correct across questions; do NOT make A correct more often.\n"
         "Return valid JSON only."
     )
 
@@ -371,7 +424,8 @@ def _call_ollama_for_chunk(model_name, chunk_text, subject, max_q, context_meta=
                 {"role": "system", "content": _get_unified_system_msg()},
                 {"role": "user", "content": _get_unified_user_prompt(max_q, subject, chunk_text)},
             ],
-            options={"temperature": 0.1, "num_predict": 4096},
+            # SPEED: lower generation budget
+            options={"temperature": 0.1, "num_predict": 1400},
             format="json",
         )
         raw = response["message"]["content"]
@@ -385,7 +439,7 @@ def _call_ollama_for_chunk(model_name, chunk_text, subject, max_q, context_meta=
 #   OPENAI QUESTION GENERATOR
 # -------------------------------------------------------------
 def _call_openai_for_chunk(model_name, chunk_text, subject, max_q, context_meta=None):
-    client = _get_openai_client()
+    client = get_openai_client()
     if client is None:
         return []
 
@@ -431,13 +485,16 @@ def _parse_raw_quiz_json(
 
     for q in qs:
         question = str(q.get("question", "")).strip()
-        choices = _normalize_choices(q.get("choices", []))
+        choices = _normalize_choices_keep_text_only(q.get("choices", []))
         if len(choices) != 4 or not question:
+            continue
+
+        if _has_duplicate_choices(choices):
             continue
 
         ans = _parse_answer_index(q.get("answer_index", None))
         if ans is None:
-            # Do not default to A; reject invalid answer_index to remove bias
+            # reject invalid answer_index (no default-to-A)
             continue
 
         explanation = str(q.get("explanation", "")).strip() or "Refer to notes."
@@ -477,6 +534,7 @@ def _parse_raw_quiz_json(
         out.append(
             {
                 "question": _normalize_math_text(question),
+                # store label-free; labels applied at the end
                 "choices": [_normalize_math_text(c) for c in choices],
                 "answer_idx": ans,
                 "explanation": _normalize_math_text(explanation),
@@ -511,23 +569,25 @@ def _fallback_quiz(corpus_text: str, subject: str, n_questions: int) -> List[Dic
         words[idx] = "_____"
         stem = " ".join(words)
 
-        wrongs = random.sample([w for w in words if w != "_____"], min(3, max(3, len(words) - 1)))
+        wrong_pool = [w for w in words if w != "_____"]
+        if len(wrong_pool) < 3:
+            continue
+        wrongs = random.sample(wrong_pool, 3)
+
         choices_raw = [ans_word] + wrongs
         random.shuffle(choices_raw)
 
-        normalized = _normalize_choices(choices_raw)
-        if not normalized:
+        # label-free internal
+        choices = choices_raw[:4]
+        if _has_duplicate_choices(choices):
             continue
 
-        # Find correct index after normalization
-        # normalized choices look like "A) <text>"
-        stripped = [c[3:].strip() for c in normalized]
-        answer_idx = stripped.index(ans_word) if ans_word in stripped else 0
+        answer_idx = choices.index(ans_word) if ans_word in choices else 0
 
         out.append(
             {
                 "question": _normalize_math_text(stem),
-                "choices": [_normalize_math_text(c) for c in normalized],
+                "choices": [_normalize_math_text(c) for c in choices],
                 "answer_idx": answer_idx,
                 "explanation": _normalize_math_text("Look at the original sentence."),
                 "needs_image": False,
@@ -539,6 +599,11 @@ def _fallback_quiz(corpus_text: str, subject: str, n_questions: int) -> List[Dic
             }
         )
 
+    # rebalance + label
+    out = _rebalance_answer_positions(out, seed=None)
+    for q in out:
+        if isinstance(q.get("choices"), list) and len(q["choices"]) == 4:
+            q["choices"] = _apply_choice_labels(q["choices"])
     return out
 
 
@@ -572,11 +637,12 @@ def build_quiz_from_corpus(
             chunk_text = item["text"]
             ctx = item["context"]
 
+            # SPEED: generate more per call => fewer LLM calls
             qs = call_fn(
                 model_name,
                 chunk_text,
                 subject,
-                max_q=min(2, remain),
+                max_q=min(4, remain),
                 context_meta=ctx,
             )
 
@@ -600,7 +666,7 @@ def build_quiz_from_corpus(
                 model_name,
                 chunk,
                 subject,
-                max_q=min(3, remain),
+                max_q=min(4, remain),
                 context_meta=None,
             )
 
@@ -612,6 +678,12 @@ def build_quiz_from_corpus(
 
     if not quiz:
         return _fallback_quiz(corpus_text, subject, n_questions)
+
+    # ANSWER POSITION BALANCE + LABELS
+    quiz = _rebalance_answer_positions(quiz, seed=None)
+    for q in quiz:
+        if isinstance(q.get("choices"), list) and len(q["choices"]) == 4:
+            q["choices"] = _apply_choice_labels(q["choices"])
 
     return quiz
 
@@ -625,7 +697,7 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
     - Build blueprint topics
     - Retrieve per-topic contexts
     - Generate 1 question per new context
-    - Verify + fix
+    - Verify + fix (optional)
     - Hard filters:
         * ban NOT/EXCEPT / "not stated" / reference/link questions
         * ban trivial purpose/housekeeping questions
@@ -668,7 +740,6 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
             if re.search(pat, t):
                 return True
 
-        # ultra short -> usually low insight
         if len(t) < 28:
             return True
 
@@ -680,7 +751,6 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
             return False
         if any(token in e.lower() for token in ("reason", "because", "therefore", "thus")):
             return True
-        # at least 2 sentences heuristic
         if len(re.split(r"(?<=[.!?])\s+", e)) >= 2:
             return True
         return False
@@ -723,7 +793,6 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
             jacc = (inter / union) if union else 0.0
             seq = SequenceMatcher(None, n, old).ratio()
 
-            # tuned to block rephrases
             if jacc >= 0.65 or seq >= 0.88:
                 return True
         return False
@@ -732,19 +801,37 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
         return max(2, (n_questions + 2) // 4)
 
     # -------------------------
+    # RAG CACHE (SPEED)
+    # -------------------------
+    _rag_cache: Dict[str, List[Any]] = {}
+
+    def _cached_get_docs(query: str, top_k: int) -> List[Any]:
+        key = f"{query}::k{top_k}"
+        if key in _rag_cache:
+            return _rag_cache[key]
+
+        _, docs, ok = get_relevant_rag(
+            db_file="chat.db",
+            rag_index_dir=subject_dir,
+            target_id=subject,
+            query=query,
+            model_name=model_name,
+            top_k=top_k,
+            vector_db=vector_db,
+            suffix=suffix,
+        )
+        res = docs if (ok and docs) else []
+        _rag_cache[key] = res
+        return res
+
+    # -------------------------
     # 1) BROAD SAMPLE for BLUEPRINT
     # -------------------------
-    _, broad_docs, success = get_relevant_rag(
-        db_file="chat.db",
-        rag_index_dir=subject_dir,
-        target_id=subject,
+    broad_docs = _cached_get_docs(
         query=f"{subject} key concepts definitions formulas examples common mistakes",
-        model_name=model_name,
         top_k=30,
-        vector_db=vector_db,
-        suffix=suffix,
     )
-    if not success or not broad_docs:
+    if not broad_docs:
         return []
 
     sample_notes = "\n\n".join((d.page_content or "") for d in broad_docs[:12])
@@ -771,7 +858,8 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
     final_quiz: List[Dict[str, Any]] = []
 
     attempts = 0
-    max_attempts = max(40, n_questions * 6)
+    # SPEED: reduce hunting
+    max_attempts = max(25, n_questions * 3)
 
     while len(final_quiz) < n_questions and attempts < max_attempts:
         attempts += 1
@@ -780,7 +868,6 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
         random.shuffle(topic_pool)
         topic, styles, keywords = min(topic_pool, key=lambda t: topic_counts.get(t[0], 0))
 
-        # respect topic cap
         if topic_counts.get(topic, 0) >= _topic_cap(topic):
             alternatives = [t for t in topic_pool if topic_counts.get(t[0], 0) < _topic_cap(t[0])]
             if alternatives:
@@ -789,49 +876,16 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
         styles = styles or ["application"]
         style = random.choice(styles)
 
-        # per-topic queries (push variety + calculations/graphs)
-        queries: List[str] = []
-        if keywords:
-            for k in keywords[:2]:
-                queries.append(f"{topic} {k} explanation example")
-        else:
-            queries.append(f"{topic} explanation example")
-
-        # lightweight variety drivers
-        queries.append(f"{topic} calculation worked example")
-
-        # retrieve docs
-        per_topic_docs = []
-        seen_meta = set()
-
-        for qtxt in queries:
-            _, docs, ok = get_relevant_rag(
-                db_file="chat.db",
-                rag_index_dir=subject_dir,
-                target_id=subject,
-                query=qtxt,
-                model_name=model_name,
-                top_k=6,
-                vector_db=vector_db,
-                suffix=suffix,
-            )
-            if not ok or not docs:
-                continue
-
-            for d in docs:
-                meta = getattr(d, "metadata", {}) or {}
-                key = (meta.get("file"), meta.get("page"), meta.get("slide"), (d.page_content or "")[:120])
-                if key in seen_meta:
-                    continue
-                seen_meta.add(key)
-                per_topic_docs.append(d)
-
+        # SPEED: single combined query instead of many queries
+        kw_txt = " ".join(keywords[:2]) if keywords else ""
+        query_txt = f"{topic} {kw_txt} {style} worked example calculation explanation"
+        per_topic_docs = _cached_get_docs(query_txt, top_k=10)
         if not per_topic_docs:
             continue
 
         random.shuffle(per_topic_docs)
 
-        # choose doc with NEW context to avoid repeated "Show Relevant Context"
+        # choose doc with NEW context
         doc = None
         for cand in per_topic_docs:
             meta = getattr(cand, "metadata", {}) or {}
@@ -846,8 +900,8 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
         if len(chunk) < 140:
             continue
 
-        # generate up to TWO questions to improve yield
-        qs = call_fn(model_name, chunk, subject, max_q=2, context_meta=None)
+        # generate up to FOUR questions to improve yield (fewer calls)
+        qs = call_fn(model_name, chunk, subject, max_q=4, context_meta=None)
         if not qs:
             continue
 
@@ -859,13 +913,12 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
             if ck in used_context_keys:
                 continue
 
-            # hard reject low-value / rephrased duplicates
             if _is_low_value_question(qobj.get("question", "")):
                 continue
             if _too_similar(qobj.get("question", "")):
                 continue
 
-            # verify + fix
+            # verify + fix (optional)
             mcq_for_verify = {
                 "question": qobj.get("question", ""),
                 "choices": qobj.get("choices", []),
@@ -888,9 +941,11 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
             else:
                 item = mcq_for_verify
 
-            # validate output
-            choices = _normalize_choices(item.get("choices", []) or [])
+            # validate output (label-free)
+            choices = _normalize_choices_keep_text_only(item.get("choices", []) or [])
             if not isinstance(choices, list) or len(choices) != 4:
+                continue
+            if _has_duplicate_choices(choices):
                 continue
 
             ans = _parse_answer_index(item.get("answer_index", None))
@@ -911,7 +966,7 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
 
             upgraded = {
                 "question": _normalize_math_text(question_text),
-                "choices": [_normalize_math_text(c) for c in choices],
+                "choices": [_normalize_math_text(c) for c in choices],  # label-free for now
                 "answer_idx": ans,
                 "explanation": _normalize_math_text(explanation_text),
                 "needs_image": False,
@@ -933,5 +988,11 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
 
         if generated:
             continue
+
+    # ANSWER POSITION BALANCE + LABELS
+    final_quiz = _rebalance_answer_positions(final_quiz, seed=None)
+    for q in final_quiz:
+        if isinstance(q.get("choices"), list) and len(q["choices"]) == 4:
+            q["choices"] = _apply_choice_labels(q["choices"])
 
     return final_quiz
