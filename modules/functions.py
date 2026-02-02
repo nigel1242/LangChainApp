@@ -98,14 +98,14 @@ def _pdf_page_texts_for_index(path: str) -> List[str]:
 
 # ----------------- RAG with FAISS (Local) -------------------
 
-def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollama_models, openai_models, suffix=""):
+def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollama_models, openai_models, suffix="", user_id=None):
     if target_name in _LOADED_FAISS_INDEXES:
         del _LOADED_FAISS_INDEXES[target_name]
         
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     # Pull text and filename from DB
-    cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
+    cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ? AND user_id = ?", (target_name, user_id))
     rows = cursor.fetchall()
     conn.close()
     
@@ -136,40 +136,88 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
                         }
                     ))
 
-    # 3. Embeddings & Saving
-    if not suffix:
-        suffix = "openai" if "gpt" in model_name.lower() else "ollama"
-    
-    if suffix == "openai":
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
-    else:
-        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+    # 3. Embeddings & Saving Logic
+    oa_key = st.session_state.get("openai_api_key")
+    embeddings = None
+
+    # Priority 1: Use OpenAI if key is present
+    if oa_key:
+        try:
+            embeddings = OpenAIEmbeddings(
+                model_name="text-embedding-3-small", 
+                api_key=oa_key
+            )
+            suffix = "openai"
+            print("Using OpenAI Embeddings for FAISS...")
+        except Exception as e:
+            print(f"OpenAI Embedding Init Failed: {e}")
+
+    # Priority 2: Use Ollama if OpenAI failed or key is missing
+    if not embeddings:
+        try:
+            embeddings = OllamaEmbeddings(model="nomic-embed-text:v1.5")
+            suffix = "ollama"
+        except Exception:
+            embeddings = None
+
+    if not embeddings:
+        st.error("❌ Indexing Failed: OpenAI key not found and Ollama is not running.")
+        return
+
+    # 4. Perform Indexing and Save
+    try:
+        faiss_index = FAISS.from_documents(all_docs, embeddings)
+        faiss_index.save_local(folder_path=subject_dir, index_name=f"index_{suffix}")
+    except Exception as e:
+        st.error(f"Error during FAISS save: {e}")
 
     faiss_index = FAISS.from_documents(all_docs, embeddings)
     faiss_index.save_local(folder_path=subject_dir, index_name=f"index_{suffix}")
     print(f"✅ Rebuilt index_{suffix} with page/slide metadata.")
 
-def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix=""):
-    # 1. Determine index naming
-    if not suffix:
-        suffix = "openai" if "gpt" in model_name.lower() else "ollama"
-    index_name = f"index_{suffix}"
+def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix="", user_id=None):
+    # 1. Determine index naming with Priority Logic
+    oa_key = st.session_state.get("openai_api_key")
     
-    # 2. Safety Check: Verify the file exists before attempting to load
+    if not suffix:
+        # If we have an OpenAI key, check if that index exists first
+        openai_path = os.path.join(subject_dir, "index_openai.faiss")
+        if oa_key and os.path.exists(openai_path):
+            suffix = "openai"
+        else:
+            # Fallback to model-based naming or Ollama
+            suffix = "openai" if "gpt" in model_name.lower() else "ollama"
+    
+    index_name = f"index_{suffix}"
     index_path = os.path.join(subject_dir, f"{index_name}.faiss")
+    
+    # 2. Safety Check: Verify the file exists
     if not os.path.exists(index_path):
-        print(f"Index not found at: {index_path}")
-        return "No RAG index found. Please process files.", [], False
+        # Final attempt: If we expected 'ollama' but only 'openai' exists, swap it
+        alt_path = os.path.join(subject_dir, "index_openai.faiss")
+        if suffix == "ollama" and os.path.exists(alt_path):
+            suffix = "openai"
+            index_name = "index_openai"
+            index_path = alt_path
+        else:
+            print(f"Index not found at: {index_path}")
+            return "No RAG index found. Please process files.", [], False
 
     # 3. Setup Embeddings
-    if suffix == "openai":
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.get("openai_api_key"))
-    else:
-        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-
-    # 4. Load and Search with Error Handling
     try:
-        # Load the index
+        if suffix == "openai":
+            if not oa_key:
+                return "OpenAI key missing for retrieval.", [], False
+            embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=oa_key)
+        else:
+            # This will fail if Ollama isn't running
+            embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+    except Exception as e:
+        print(f"Embedding Setup Error: {e}")
+        return "Failed to initialize embedding service.", [], False
+
+    # 4. Load and Search
+    try:
         faiss_index = FAISS.load_local(
             folder_path=subject_dir, 
             embeddings=embeddings, 
@@ -177,28 +225,20 @@ def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name,
             allow_dangerous_deserialization=True
         )
         
-        # Perform the search ONCE
         docs_with_scores = faiss_index.similarity_search_with_score(query, k=top_k)
-        
-        # Extract documents and build context
         docs = [d for d, score in docs_with_scores]
         context = "\n\n".join([d.page_content for d in docs])
         
-        # --- DEBUG SECTION ---
-        # We use the existing docs_with_scores from the search above
+        # Debug printing
         for i, (doc, score) in enumerate(docs_with_scores):
-            print(f"--- Result {i} ---")
-            print(f"File: {doc.metadata.get('file')}")
-            print(f"Slide: {doc.metadata.get('slide')}")
-            print(f"Page: {doc.metadata.get('page')}")
-            snippet = doc.page_content[:50].replace("\n", " ")
-            print(f"Text Snippet: {snippet}...")
+            print(f"--- Result {i} (Score: {score:.4f}) ---")
+            print(f"File: {doc.metadata.get('file')} | Page: {doc.metadata.get('page')}")
         
         return context, docs, True
         
     except Exception as e:
         print(f"Error loading or searching FAISS: {e}")
-        return "", [], False
+        return "Search failed. The index might be corrupted or incompatible.", [], False
 # ----------------- RAG with Qdrant (Remote) -------------------
 
 def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollama_models, openai_models, qdrant_api_key=None):
@@ -288,14 +328,14 @@ def generate_chat_title(first_message: str, model_name: str, openai_client=None)
 
 # ----------------- Unified Dispatchers -------------------
 
-def rebuild_rag_index(db_file, rag_index_dir=None, target_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):
+def rebuild_rag_index(db_file, subject_dir=None, target_id=None, model_name=None, ollama_models=None, openai_models=None, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix="", user_id=None):
     if vector_db == "faiss":
-        rebuild_rag_index_faiss(db_file, rag_index_dir, target_id, model_name, ollama_models, openai_models, suffix)
+        rebuild_rag_index_faiss(db_file, subject_dir, target_id, model_name, ollama_models, openai_models, suffix, user_id)
     elif vector_db == "qdrant":
         rebuild_rag_index_qdrant(db_file, qdrant_url, target_id, model_name, ollama_models, openai_models, qdrant_api_key)
 
-def get_relevant_rag(db_file, rag_index_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix=""):
+def get_relevant_rag(db_file, subject_dir=None, target_id=None, query=None, model_name=None, ollama_models=None, openai_models=None, top_k=3, vector_db="faiss", qdrant_url=None, qdrant_api_key=None, suffix="", user_id=None):
     if vector_db == "faiss":
-        return get_relevant_rag_faiss(db_file, rag_index_dir, target_id, query, model_name, ollama_models, openai_models, top_k, suffix)
+        return get_relevant_rag_faiss(db_file, subject_dir, target_id, query, model_name, ollama_models, openai_models, top_k, suffix, user_id)
     elif vector_db == "qdrant":
         return get_relevant_rag_qdrant(db_file, qdrant_url, target_id, query, model_name, ollama_models, openai_models, top_k, qdrant_api_key)

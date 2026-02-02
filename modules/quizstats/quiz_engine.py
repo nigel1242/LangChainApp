@@ -5,14 +5,14 @@ import json
 import os
 import random
 import re
-from typing import Any, Dict, List, Optional
-
 import ollama
+from typing import Any, Dict, List, Optional
+from difflib import SequenceMatcher
 from openai import OpenAI
 
 # NEW: use the subject index so we know which slide/page a question came from
 from modules.quizstats.file_utils import get_subject_index_entries
-from modules.functions import get_openai_client
+from modules.functions import get_openai_client, get_relevant_rag
 
 # -------------------------------------------------------------
 #   QUALITY HELPERS
@@ -691,7 +691,7 @@ def build_quiz_from_corpus(
 # -------------------------------------------------------------
 #   MAIN PUBLIC API (RAG)  ✅ DIVERSITY + NO LOW-VALUE QUESTIONS
 # -------------------------------------------------------------
-def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: str = "faiss") -> List[Dict[str, Any]]:
+def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: str = "faiss", user_id: int = None, ollama_models: tuple = (), openai_models: tuple = ()) -> List[Dict[str, Any]]:
     """
     Single-engine flow:
     - Build blueprint topics
@@ -705,10 +705,8 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
         * avoid repeated context (file/page/slide)
         * avoid rephrased duplicates (near-duplicate detection)
     """
-    from modules.functions import get_relevant_rag
-    from difflib import SequenceMatcher
 
-    subject_dir = os.path.join("modules", "subjects", subject)
+    subject_dir = os.path.join("modules", "subjects", f"user_{user_id}", subject)
     is_openai = "gpt" in model_name.lower()
     suffix = "openai" if is_openai else "ollama"
     verify_enabled = False
@@ -812,13 +810,16 @@ def build_quiz_from_rag(subject, model_name, n_questions: int = 10, vector_db: s
 
         _, docs, ok = get_relevant_rag(
             db_file="chat.db",
-            rag_index_dir=subject_dir,
+            subject_dir=subject_dir, 
             target_id=subject,
             query=query,
             model_name=model_name,
+            ollama_models=ollama_models,
+            openai_models=openai_models,
             top_k=top_k,
             vector_db=vector_db,
             suffix=suffix,
+            user_id=user_id,
         )
         res = docs if (ok and docs) else []
         _rag_cache[key] = res

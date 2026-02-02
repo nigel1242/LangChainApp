@@ -1,4 +1,4 @@
-# app.py
+# chat.py
 from __future__ import annotations
 import os
 import re
@@ -23,8 +23,6 @@ from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path,
 
 load_dotenv()
 CHAT_DB_FILE = "chat.db"
-SUBJECTS_DIR = os.path.join("modules", "subjects")
-os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
 # ------------------ CONFIG ------------------
 st.set_page_config(page_title="My Learning AI", page_icon="📚", layout="wide")
@@ -65,62 +63,79 @@ def main():
         # Only use these if you notice the model consistently failing backslashes
         return text
 
-    # 1. AUTHENTICATION (Always first)
+    # 1. AUTHENTICATION
     is_authenticated, username = check_authentication()
     if not is_authenticated:
         st.markdown("<style>[data-testid='stSidebar'] {display: none;}</style>", unsafe_allow_html=True)
         login_page()
         st.stop()
 
-    # 2. DEFINE CONFIGURATION VARIABLES FIRST
-    q_url = os.getenv("QDRANT_URL", "").strip()
-    q_key = os.getenv("QDRANT_API_KEY", "").strip()
-    oa_key = st.session_state.get("openai_api_key", os.getenv("OPENAI_API_KEY", "")).strip()
+    user_id = st.session_state.get("user_id")
 
-    # Determine backend status
+    # 2. POST-AUTH STABILIZATION GUARD
+    # This block only runs once per login to lock the DB and Folders
+    if not st.session_state.get("app_initialized") or "db" not in st.session_state:
+        # Create user root folder
+        USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
+        os.makedirs(USER_DATA_ROOT, exist_ok=True)
+
+        # Init DB Manager
+        temp_db = DBManager(backend="sqlite", user_id=user_id, db_file=CHAT_DB_FILE)
+        
+        # Ensure 'General' exists
+        existing_subs = temp_db.load_all_subjects()
+        if "General" not in existing_subs:
+            temp_db.add_subject("General")
+            ensure_subject_folders("General", user_id)
+        
+        # Lock state and force rerun
+        st.session_state.db = temp_db
+        st.session_state.app_initialized = True
+        st.session_state.current_subject = "General" 
+        st.rerun() 
+
+    # 3. DEFINE VARIABLES (Reached ONLY after initialization is successful)
+    db = st.session_state.db
+    USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
+    
+    # Define OpenAI status
+    oa_key = st.session_state.get("openai_api_key", os.getenv("OPENAI_API_KEY", "")).strip()
+    openai_functional = bool(oa_key) # Defined here!
+    st.session_state.openai_api_key = oa_key
+
+    # Define Qdrant/Backend status
     using_qdrant = st.session_state.get("vector_db") == "qdrant"
     lock_ui = False
-
-    # Perform Qdrant connectivity test if applicable
+    
     if using_qdrant:
+        q_url = os.getenv("QDRANT_URL", "").strip()
+        q_key = os.getenv("QDRANT_API_KEY", "").strip()
         if not q_url or not q_key:
             lock_ui = True
         else:
             try:
-                # 3-second timeout for quick validation
-                test_client = QdrantClient(url=q_url, api_key=q_key, timeout=3)
+                from qdrant_client import QdrantClient
+                test_client = QdrantClient(url=q_url, api_key=q_key, timeout=2)
                 test_client.get_collections()
-            except Exception:
+            except:
                 lock_ui = True
+
+    # 4. DATA RETRIEVAL & SAFETY FALLBACKS
+    subjects = db.load_all_subjects()
+    if not subjects:
+        subjects = ["General"]
     
-    # Perform OpenAI key validation
-    openai_functional = False
-    if oa_key:
-        # Instead of a full model list check (which is slow), 
-        # just trust the key presence if it was already validated in Settings.
-        openai_functional = True 
+    if st.session_state.current_subject not in subjects:
+        st.session_state.current_subject = subjects[0]
 
-    # Update session state so the rest of the app knows the status
-    st.session_state.openai_api_key = oa_key
-
-    # 3. INITIALIZE QDRANT CLIENT (Now safe because variables are defined)
-    if "qdrant_client" not in st.session_state and using_qdrant and not lock_ui:
-        st.session_state.qdrant_client = QdrantClient(
-            url=q_url, 
-            api_key=q_key,
-            timeout=10 
-        )
-
-    # 4. SET SESSION STATE DEFAULTS
+    # 5. SET SESSION STATE DEFAULTS
     defaults = {
-        "current_subject": "General",
         "messages": [],
         "current_chat_id": None,
         "selected_model": None,
         "vision_images": [],
         "uploaded_files_to_process": [],
         "rag_enabled": True,
-        "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
         "last_assistant_text": "",
         "temp_prompt": None,
         "tts_audio_bytes": None,
@@ -129,68 +144,57 @@ def main():
         "last_audio_bytes": None,
         "vector_db": "faiss",
         "chat_backend": "sqlite",
-        "qdrant_url": q_url,
-        "qdrant_api_key": q_key,
         "vision_uploader_key": 0,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
 
-    # 5. MAIN APP INTERFACE
+    # 6. MAIN APP INTERFACE
     st.title("📖 My Learning AI")
 
     if lock_ui:
-        st.error("⚠️ Qdrant Backend Locked: Please provide API credentials in Settings or switch back to Local (FAISS).")
+        st.error("⚠️ Qdrant Backend Locked: Check credentials in Settings.")
         
     if not openai_functional:
+        # We only toast if it hasn't been shown in this specific rerun cycle
         st.toast("**Warning:** OpenAI features are limited.", icon="⚠️")
 
-    # Initialize DB Manager based on current settings
-    db = None
-    if using_qdrant and not lock_ui:
-        try:
-            active_backend = st.session_state.chat_backend
-            db = DBManager(backend=active_backend, db_file=CHAT_DB_FILE, qdrant_url=q_url, qdrant_api_key=q_key)
-        except Exception as e:
-            lock_ui = True
-            st.error(f"⚠️ Qdrant Connection Failed: {e}")
-                
-    if db is None:
-        db = DBManager(backend="sqlite", db_file=CHAT_DB_FILE)
-
-    subjects = db.load_all_subjects()
     # ---------------- SIDEBAR ----------------
     with st.sidebar:
         st.markdown(f"**User: {username}**")
-        if st.button("Logout"): logout(); st.rerun()
+        if st.button("Logout"): 
+            logout()
+            st.rerun()
         st.markdown("---")
 
         st.header("📚 Subject Library")
         
-        if "General" not in subjects:
-            db.add_subject("General")
-            subjects = db.load_all_subjects()
-        
+        # Securely determine the index
+        try:
+            curr_idx = subjects.index(st.session_state.current_subject)
+        except (ValueError, KeyError, IndexError):
+            curr_idx = 0
+            st.session_state.current_subject = subjects[0]
+
         selected_sub = st.selectbox(
             "Select Subject",
-            subjects,
-            index=subjects.index(st.session_state.current_subject) if st.session_state.current_subject in subjects else 0,
-            disabled=lock_ui
+            options=subjects,
+            index=curr_idx,
+            disabled=(using_qdrant and lock_ui)
         )
         
         if selected_sub != st.session_state.current_subject:
             st.session_state.current_subject = selected_sub
             st.session_state.messages = []
             st.session_state.current_chat_id = None
-            st.session_state.last_assistant_text = ""
             st.rerun()
 
         with st.expander("➕ New Subject"):
             new_sub = st.text_input("Subject Name", disabled=lock_ui)
             if st.button("Create Subject") and new_sub.strip():
                 db.add_subject(new_sub.strip())
-                ensure_subject_folders(new_sub.strip())
+                ensure_subject_folders(new_sub.strip(), user_id)
                 st.session_state.current_subject = new_sub.strip()
                 st.session_state.current_chat_id = None
                 st.session_state.messages = []
@@ -209,7 +213,7 @@ def main():
                 
                 with col_yes:
                     if st.button("✅ Yes, Delete", type="primary", width='stretch'):
-                        db.delete_subject(selected_sub, rag_index_dir=SUBJECTS_DIR)
+                        db.delete_subject(selected_sub, subject_dir=USER_DATA_ROOT)
                         st.session_state.current_subject = "General"
                         st.session_state.current_chat_id = None
                         st.session_state.messages = []
@@ -313,7 +317,7 @@ def main():
                 target_sub = st.session_state.current_subject
                 
                 if uploaded_files:
-                    raw_dir = os.path.join("modules", "subjects", target_sub, "raw")
+                    raw_dir = os.path.join(USER_DATA_ROOT, target_sub, "raw")
                     os.makedirs(raw_dir, exist_ok=True)
                     existing_filenames = os.listdir(raw_dir)
                     
@@ -334,16 +338,13 @@ def main():
                         
                         # --- DUPLICATE CHECK ---
                         if f.name in existing_filenames:
-                            msg_placeholder.warning(f"⚠️ {f.name} already exists. Skipping...")
-                            time.sleep(1.5) # Brief pause so user can read it
-                            msg_placeholder.empty()
                             continue 
 
                         # --- NEW FILE PROCESSING ---
                         status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
                         
                         f.seek(0)
-                        save_uploaded_files(target_sub, [f])
+                        save_uploaded_files(target_sub, [f], user_id=user_id)
                         original_path = os.path.join(raw_dir, f.name)
                         
                         # Convert PPTX/DOCX to PDF
@@ -388,16 +389,15 @@ def main():
 
                     # --- FINAL FAISS SYNC ---
                     if st.session_state.vector_db == "faiss":
-                        subject_path = os.path.join(SUBJECTS_DIR, target_sub)
+                        subject_path = os.path.join(USER_DATA_ROOT, target_sub)
                         if use_ollama:
                             status_text.text("🔄 Rebuilding Ollama FAISS index...")
                             rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
-                                            ollama_models, openai_models, suffix="ollama")
+                                            ollama_models, openai_models, suffix="ollama", user_id=user_id)
                         if use_openai:
                             status_text.text("🔄 Rebuilding OpenAI FAISS index...")
                             rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
-                                            ollama_models, openai_models, suffix="openai")
-
+                                            ollama_models, openai_models, suffix="openai", user_id=user_id)
                     st.success(f"✅ Knowledge Base Processed!")
                     time.sleep(2)
                     st.rerun()
@@ -415,7 +415,7 @@ def main():
                     for i, source in enumerate(msg["sources"]):
                         f_name = source.get("file")
                         page_num = source.get("page", 1)
-                        pdf_path = os.path.join(SUBJECTS_DIR, st.session_state.current_subject, "raw", f_name)
+                        pdf_path = os.path.join(USER_DATA_ROOT, st.session_state.current_subject, "raw", f_name)
                         
                         if os.path.exists(pdf_path):
                             img = render_pdf_page_image(pdf_path, page_num)
@@ -490,8 +490,7 @@ def main():
         # Ensure Chat Session exists
         if st.session_state.current_chat_id is None:
             st.session_state.current_chat_id = db.create_new_chat(
-                st.session_state.selected_model,
-                st.session_state.current_subject
+                st.session_state.current_subject, st.session_state.selected_model
             )
         
         chat_id = st.session_state.current_chat_id
@@ -527,7 +526,7 @@ def main():
                 except Exception as e: 
                     st.error(f"Qdrant RAG Error: {e}")
             elif st.session_state.vector_db == "faiss":
-                subject_index_dir = os.path.join(SUBJECTS_DIR, search_id)
+                subject_index_dir = os.path.join(USER_DATA_ROOT, search_id)
                 with st.spinner("🔍 Searching Knowledge Base (FAISS)..."):
                     rag_content, raw_docs, has_docs = get_relevant_rag(
                         CHAT_DB_FILE, subject_index_dir, search_id, user_p,

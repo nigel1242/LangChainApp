@@ -2,7 +2,6 @@ import json
 import sqlite3
 import os
 import shutil
-
 from modules.quizstats.progress_store import clear_subject_stats
 
 def init_db_sqlite(db_file: str):
@@ -10,19 +9,21 @@ def init_db_sqlite(db_file: str):
     cursor = conn.cursor()
     cursor.execute("PRAGMA foreign_keys = ON;")
 
-    # 1. SUBJECTS
+    # 1. SUBJECTS - Added user_id and made (name, user_id) unique
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS subjects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            backend_type TEXT DEFAULT 'sqlite'
+            name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            UNIQUE(name, user_id)
         )
     """)
 
-    # 2. CHATS
+    # 2. CHATS - Added user_id and linked to subject_name
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             subject_name TEXT NOT NULL,
             model_name TEXT,
             title TEXT DEFAULT 'New Chat',
@@ -32,11 +33,12 @@ def init_db_sqlite(db_file: str):
     """)
 
     # --- SCHEMA MIGRATION ---
-    # Ensures the 'title' column exists in older database files
     cursor.execute("PRAGMA table_info(chats)")
     columns = [column[1] for column in cursor.fetchall()]
     if "title" not in columns:
         cursor.execute("ALTER TABLE chats ADD COLUMN title TEXT DEFAULT 'New Chat'")
+    if "user_id" not in columns:
+        cursor.execute("ALTER TABLE chats ADD COLUMN user_id INTEGER DEFAULT 1")
 
     # 3. MESSAGES
     cursor.execute("""
@@ -55,6 +57,7 @@ def init_db_sqlite(db_file: str):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rag_docs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             subject_name TEXT NOT NULL,
             file_name TEXT,
             content TEXT,
@@ -65,25 +68,33 @@ def init_db_sqlite(db_file: str):
     conn.commit()
     conn.close()
 
-def add_subject_sqlite(db_file, name, backend_type='sqlite'):
+# --- SUBJECT FUNCTIONS ---
+
+def add_subject_sqlite(db_file, name, user_id):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO subjects (name, backend_type) VALUES (?, ?)", (name, backend_type))
+    # Corrected columns: name, user_id
+    cursor.execute("INSERT OR IGNORE INTO subjects (name, user_id) VALUES (?, ?)", (name, user_id))
     conn.commit()
     conn.close()
 
-def load_all_subjects_sqlite(db_file, backend_type='sqlite'):
+def load_all_subjects_sqlite(db_file, user_id):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM subjects WHERE backend_type = ?", (backend_type,))
+    cursor.execute("SELECT name FROM subjects WHERE user_id = ?", (user_id,))
     rows = cursor.fetchall()
     conn.close()
     return [r[0] for r in rows]
 
-def create_new_chat_sqlite(db_file: str, subject_name: str, model_name: str):
+# --- CHAT FUNCTIONS ---
+
+def create_new_chat_sqlite(db_file: str, user_id: int, subject_name: str, model_name: str):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO chats (subject_name, model_name) VALUES (?, ?)", (subject_name, model_name))
+    cursor.execute(
+        "INSERT INTO chats (user_id, subject_name, model_name) VALUES (?, ?, ?)", 
+        (user_id, subject_name, model_name)
+    )
     chat_id = cursor.lastrowid
     conn.commit()
     conn.close()
@@ -96,14 +107,28 @@ def update_chat_title_sqlite(db_file: str, chat_id: int, new_title: str):
     conn.commit()
     conn.close()
 
-def load_all_chats_by_subject_sqlite(db_file: str, subject_name: str):
+def load_all_chats_sqlite(db_file: str, user_id: int, subject_name: str):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    # Now includes 'title' for the sidebar
-    cursor.execute("SELECT id, model_name, created_at, title FROM chats WHERE subject_name = ? ORDER BY created_at DESC", (subject_name,))
+    # Isolates chats by BOTH user and subject
+    cursor.execute("""
+        SELECT id, model_name, created_at, title 
+        FROM chats 
+        WHERE user_id = ? AND subject_name = ? 
+        ORDER BY created_at DESC
+    """, (user_id, subject_name))
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+def delete_chat_sqlite(db_file: str, chat_id: int):
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+# --- MESSAGE FUNCTIONS ---
 
 def add_message_sqlite(db_file: str, chat_id, role, content, used_rag=0):
     conn = sqlite3.connect(db_file)
@@ -126,21 +151,24 @@ def load_chat_sqlite(db_file: str, chat_id):
     conn.close()
     return [{"role": r, "content": c, "used_rag": ur} for r, c, ur in rows], model_name
 
-def add_rag_doc_sqlite(db_file, subject_name, file_name, content, metadata=None):
+# --- RAG / KNOWLEDGE BASE FUNCTIONS ---
+
+def add_rag_doc_sqlite(db_file, user_id, subject_name, file_name, content, metadata=None):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     try:
-        # 1. Check for duplicates
-        cursor.execute("SELECT id FROM rag_docs WHERE subject_name = ? AND file_name = ?", (subject_name, file_name))
+        cursor.execute("SELECT id FROM rag_docs WHERE user_id = ? AND subject_name = ? AND file_name = ?", 
+                       (user_id, subject_name, file_name))
         if cursor.fetchone(): 
             return False, f"{file_name} exists."    
-        # 2. Convert dictionary to JSON string so SQLite can save it
+        
         meta_str = json.dumps(metadata) if metadata else "{}"
-        # 3. Insert into the 4 columns
+        
         cursor.execute(
-            "INSERT INTO rag_docs (subject_name, file_name, content, metadata) VALUES (?, ?, ?, ?)", 
-            (subject_name, file_name, content, meta_str)
+            "INSERT INTO rag_docs (user_id, subject_name, file_name, content, metadata) VALUES (?, ?, ?, ?, ?)", 
+            (user_id, subject_name, file_name, content, meta_str)
         )
+        
         conn.commit()
         return True, "Success"
     finally: 
@@ -163,14 +191,9 @@ def file_exists_sqlite(db_file, subject, filename):
     conn.close()
     return res is not None
 
-def delete_chat_sqlite(db_file: str, chat_id: int):
-    conn = sqlite3.connect(db_file)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
+# --- CLEANUP FUNCTIONS ---
 
-def delete_subject_sqlite(db_file: str, subject_name: str, rag_index_dir: str = None):
+def delete_subject_sqlite(db_file: str, subject_name: str, subject_dir: str = None):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     try:
@@ -179,13 +202,14 @@ def delete_subject_sqlite(db_file: str, subject_name: str, rag_index_dir: str = 
         conn.commit()
     finally:
         conn.close()
+    
     try:
         clear_subject_stats(subject_name)
     except Exception as e:
         print(f"Error clearing statistics for {subject_name}: {e}")
 
-    if rag_index_dir:
-        path = os.path.join(rag_index_dir, subject_name) 
+    if subject_dir:
+        path = os.path.join(subject_dir, subject_name) 
         if os.path.isdir(path):
             try:
                 shutil.rmtree(path)

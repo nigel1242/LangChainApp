@@ -97,8 +97,8 @@ def build_topic_alias_map(topics: list[str], threshold: float = 0.88) -> dict[st
 # ------------------ INIT ------------------
 def init_page():
     init_stats_db()
-    return DBManager(backend="sqlite", db_file=CHAT_DB_FILE)
-
+    user_id = st.session_state.get("user_id")
+    return DBManager(backend="sqlite", user_id=user_id, db_file=CHAT_DB_FILE)
 
 db = init_page()
 
@@ -128,7 +128,7 @@ if selected_subject != st.session_state.get("current_subject"):
     st.rerun()
 
 # ------------------ DATA RETRIEVAL ------------------
-attempts = get_attempts_for_subject(selected_subject)
+attempts = get_attempts_for_subject(selected_subject, user_id=st.session_state.get("user_id"))
 
 if not attempts:
     st.info(f"No attempts recorded for **{selected_subject}** yet.")

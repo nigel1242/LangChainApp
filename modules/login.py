@@ -276,12 +276,6 @@ def logout():
     if token:
         delete_session(token)
     
-    st.session_state["authenticated"] = False
-    if "user_id" in st.session_state:
-        del st.session_state["user_id"]
-    if "username" in st.session_state:
-        del st.session_state["username"]
-    
-    for key in list(st.session_state.keys()):
-        if key not in ["authenticated"]:
-            del st.session_state[key]
+    # Clear EVERYTHING to prevent session leakage between users
+    st.session_state.clear() 
+    st.rerun()

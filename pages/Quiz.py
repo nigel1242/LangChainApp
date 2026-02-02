@@ -7,6 +7,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import streamlit as st
 from dotenv import load_dotenv
 import ollama
+import threading
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 # --- Local Module Imports ---
 from modules.db_manager import DBManager 
@@ -28,9 +30,11 @@ SUBJECTS_DIR = os.path.join("modules", "subjects")
 
 os.makedirs(SUBJECTS_DIR, exist_ok=True)
 
+user_id = st.session_state.get("user_id")
 # Initialize DBManager
 db = DBManager(
     backend="sqlite",
+    user_id=user_id,
     db_file=CHAT_DB_FILE,
 )
 
@@ -39,6 +43,11 @@ is_authenticated, username = check_authentication()
 if not is_authenticated:
     login_page()
     st.stop()
+
+def thread_wrapper(fn, ctx, *args, **kwargs):
+    """Injects the Streamlit context into the thread before running the function."""
+    add_script_run_ctx(threading.current_thread(), ctx)
+    return fn(*args, **kwargs)
 
 # ---------- SESSION DEFAULTS ----------
 if "quiz_state" not in st.session_state:
@@ -118,11 +127,12 @@ if selected_subject != S["selected_subject"]:
     st.rerun()
 
 # Index Path Check
-subject_folder = os.path.join(SUBJECTS_DIR, S["selected_subject"])
+user_root = os.path.join("modules", "subjects", f"user_{user_id}")
+subject_folder = os.path.join(user_root, S["selected_subject"])
 index_path = os.path.join(subject_folder, f"index_{suffix}.faiss")
 
 if os.path.exists(index_path):
-    st.success(f"✅ {suffix.upper()} Index found. Ready to generate.")
+    pass
 else:
     st.error(f"⚠️ Please upload files and click 'Process RAG' below.")
 
@@ -144,7 +154,7 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
         target_sub = S["selected_subject"]
         
         if uploaded_files:
-            raw_dir = os.path.join(SUBJECTS_DIR, target_sub, "raw")
+            raw_dir = os.path.join(SUBJECTS_DIR, f"user_{user_id}", target_sub, "raw")
             os.makedirs(raw_dir, exist_ok=True)
             existing_filenames = os.listdir(raw_dir)
             
@@ -175,7 +185,7 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
                 status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
                 
                 f.seek(0)
-                save_uploaded_files(target_sub, [f])
+                save_uploaded_files(target_sub, [f], user_id=user_id)
                 original_path = os.path.join(raw_dir, f.name)
                 
                 # Convert PPTX/DOCX to PDF
@@ -223,16 +233,16 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
 
             # --- FINAL FAISS SYNC ---
             if st.session_state.vector_db == "faiss":
-                subject_path = os.path.join(SUBJECTS_DIR, target_sub)
+                subject_path = os.path.join(SUBJECTS_DIR, f"user_{user_id}", target_sub)
+                index_path = os.path.join(subject_path, f"index_{suffix}.faiss")
                 if use_ollama:
                     status_text.text("🔄 Rebuilding Ollama FAISS index...")
                     rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
-                                     ollama_models, openai_models, suffix="ollama")
+                                        ollama_models, openai_models, suffix="ollama", user_id=user_id)
                 if use_openai:
                     status_text.text("🔄 Rebuilding OpenAI FAISS index...")
                     rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
-                                     ollama_models, openai_models, suffix="openai")
-
+                                        ollama_models, openai_models, suffix="openai", user_id=user_id)
             st.success(f"✅ Knowledge Base Processed!")
             time.sleep(2)
             st.rerun()
@@ -242,7 +252,6 @@ if st.button("🎲 Generate 10 Questions"):
     if not os.path.exists(index_path):
         st.error("Please Process & Sync files first.")
     else:
-        # 1. Create side-by-side placeholders for status and timer
         colA, colB = st.columns([3, 1])
         with colA:
             status_ph = st.empty()
@@ -250,33 +259,41 @@ if st.button("🎲 Generate 10 Questions"):
             timer_ph = st.empty()
 
         status_ph.info("🧠 Analyzing Knowledge Base...")
-        start = time.perf_counter() # Start the clock
+        start = time.perf_counter()
 
         quiz = None
         err = None
+        
+        # --- FIX STARTS HERE ---
+        # 1. Capture the context of the current browser session
+        ctx = get_script_run_ctx()
 
-        # 2. Run the blocking LLM function in a background thread
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            # 2. Use the wrapper to run build_quiz_from_rag with the captured context
             future = executor.submit(
+                thread_wrapper,
                 build_quiz_from_rag,
+                ctx, # Pass the context as the first argument to the wrapper
                 subject=S["selected_subject"],
                 model_name=st.session_state.selected_model,
                 n_questions=10,
                 vector_db="faiss",
+                user_id=user_id,
+                ollama_models=ollama_models,
+                openai_models=openai_models,
             )
 
-            # 3. LIVE TIMER LOOP: Updates UI while background thread works
             while not future.done():
                 elapsed = time.perf_counter() - start
                 timer_ph.metric("Load time", f"{elapsed:0.1f}s")
-                time.sleep(0.1) # Frequency of UI refresh
+                time.sleep(0.1)
 
             try:
-                quiz = future.result() # Collect the generated quiz
+                quiz = future.result() 
             except Exception as e:
                 err = e
+        # --- FIX ENDS HERE ---
 
-        # 4. Clean up UI after completion
         elapsed = time.perf_counter() - start
         timer_ph.metric("Load time", f"{elapsed:0.1f}s", "done")
         status_ph.empty()
@@ -287,41 +304,62 @@ if st.button("🎲 Generate 10 Questions"):
             S.update({"quiz": quiz, "current_idx": 0, "score": 0, "submitted": {}})
             st.rerun()
         else:
-            st.error("Failed to generate questions. Try a different model.")
+            st.error("Failed to generate questions. Check terminal for LLM errors.")
 
 # ---------- QUIZ PLAYER ----------
-if S["quiz"]:
+@st.fragment
+def play_quiz(user_id):
+    S = st.session_state.quiz_state
+    
+    if not S["quiz"]:
+        st.info("No quiz generated yet.")
+        return
+
     st.divider()
     
-    # Check if we have finished all questions
+    # --- FINISHED PAGE ---
     if S["current_idx"] >= len(S["quiz"]):
-        # --- FINISHED PAGE ---
         st.success("🎉 Quiz Finished!")
         st.header(f"Final Score: {S['score']} / {len(S['quiz'])}")
-    else:
-        # --- ACTIVE QUIZ ---
-        q_idx = S["current_idx"]
-        q = S["quiz"][q_idx]
-        has_submitted = S["submitted"].get(q_idx, False)
+        
+        if st.button("Restart & Clear"):
+            S.update({"quiz": [], "current_idx": 0, "score": 0, "submitted": {}})
+            st.rerun() 
+        return
 
-        st.subheader(f"Question {q_idx + 1}")
+    # --- ACTIVE QUIZ ---
+    q_idx = S["current_idx"]
+    q = S["quiz"][q_idx]
+    has_submitted = S["submitted"].get(q_idx, False)
 
-        with st.expander(f"🔍 Show Relevant Context", expanded=False):
-            meta = q.get("context_meta", {})
-            f_name = meta.get("file")
-            page_num = meta.get("page", 1)
-            pdf_path = os.path.join(SUBJECTS_DIR, S["selected_subject"], "raw", f_name)
+    st.subheader(f"Question {q_idx + 1}")
 
-            if f_name and os.path.exists(pdf_path):
+    # --- CONTEXT RENDERING ---
+    with st.expander("🔍 Show Relevant Context", expanded=False):
+        meta = q.get("context_meta", {})
+        f_name = meta.get("file")
+        page_num = meta.get("page", 1)
+        
+        # Ensure path points to the user-specific raw folder
+        user_root = os.path.join("modules", "subjects", f"user_{user_id}")
+        pdf_path = os.path.join(user_root, S["selected_subject"], "raw", f_name)
+
+        if f_name and os.path.exists(pdf_path):
+            try:
+                # Re-render inside the fragment to ensure it displays correctly after rerun
                 img = render_pdf_page_image(pdf_path, page_num)
                 if img:
-                    st.image(img, caption=f"Source: {f_name} | Page {page_num}", width='stretch')
+                    st.image(img, caption=f"Source: {f_name} (Page {page_num})", use_container_width=True)
                 else:
-                    st.warning("Rendering failed for this page.")
-            else:
-                st.error("Original source PDF not found.")
-                st.write(q.get("explanation", "No additional context available."))
+                    st.warning("Could not render page image.")
+            except Exception as e:
+                st.error(f"Error loading context: {e}")
+        else:
+            st.info("Context metadata found, but source file is missing.")
+            st.write(q.get("explanation", "No additional reasoning provided."))
 
+    # --- THE FORM ---
+    with st.form("quiz_form"):
         st.markdown(f"### {q['question']}")
         
         picked = st.radio(
@@ -333,40 +371,47 @@ if S["quiz"]:
         )
 
         col1, col2, col3 = st.columns([1, 1, 2])
-        
         with col1:
-            if st.button("Submit", disabled=has_submitted):
-                if picked:
-                    is_correct = (q["choices"].index(picked) == q["answer_idx"])
-                    S["submitted"][q_idx] = True
-                    if is_correct:
-                        S["score"] += 1
-                    
-                    record_attempt(
-                        subject=S["selected_subject"], 
-                        question=q["question"],
-                        chosen=picked, 
-                        correct=q["choices"][q["answer_idx"]],
-                        is_correct=1 if is_correct else 0, 
-                        topic=q.get("topic", "General")
-                    )
-                    st.rerun()
-                else:
-                    st.warning("Please select an option.")
-
-        if has_submitted:
-            is_correct = (q["choices"].index(st.session_state.get(f"q_{q_idx}")) == q["answer_idx"])
-            if is_correct:
-                st.success("✨ Correct!")
-            else:
-                st.error(f"❌ Incorrect. Correct answer: {q['choices'][q['answer_idx']]}")
-
+            submit_btn = st.form_submit_button("Submit", disabled=has_submitted)
         with col2:
-            # Change label to 'Finish' on the last question
             label = "Finish" if q_idx == len(S["quiz"]) - 1 else "Next"
-            if st.button(label) and has_submitted:
-                S["current_idx"] += 1
-                st.rerun()
-        
+            next_btn = st.form_submit_button(label)
         with col3:
             st.metric("Progress", f"{q_idx + 1} / {len(S['quiz'])}", f"Score: {S['score']}")
+
+    # --- LOGIC ---
+    if submit_btn and not has_submitted:
+        if picked:
+            is_correct = (q["choices"].index(picked) == q["answer_idx"])
+            S["submitted"][q_idx] = True
+            if is_correct:
+                S["score"] += 1
+            
+            record_attempt(
+                user_id=st.session_state.user_id,
+                subject=S["selected_subject"], 
+                question=q["question"],
+                chosen=picked, 
+                correct=q["choices"][q["answer_idx"]],
+                is_correct=1 if is_correct else 0, 
+                topic=q.get("topic", "General")
+            )
+            st.rerun(scope="fragment") 
+        else:
+            st.warning("Please select an option.")
+
+    if has_submitted:
+        correct_text = q["choices"][q["answer_idx"]]
+        user_choice = st.session_state.get(f"q_{q_idx}")
+        if user_choice == correct_text:
+            st.success("✨ Correct!")
+        else:
+            st.error(f"❌ Incorrect. Answer: {correct_text}")
+
+        if next_btn:
+            S["current_idx"] += 1
+            st.rerun(scope="fragment")
+
+# 4. Call the fragment in your main script logic
+if S["quiz"]:
+    play_quiz(user_id)
