@@ -337,22 +337,24 @@ def play_quiz(user_id):
 
     st.subheader(f"Question {q_idx + 1}")
 
-    # --- CONTEXT RENDERING ---
+    # --- CONTEXT RENDERING (COMPACT) ---
     with st.expander("🔍 Show Relevant Context", expanded=False):
         meta = q.get("context_meta", {})
         f_name = meta.get("file")
         page_num = meta.get("page", 1)
         
-        # Ensure path points to the user-specific raw folder
-        user_root = os.path.join("modules", "subjects", f"user_{user_id}")
-        pdf_path = os.path.join(user_root, S["selected_subject"], "raw", f_name)
+        # Use the established USER_DATA_ROOT variable
+        pdf_path = os.path.join(USER_DATA_ROOT, S["selected_subject"], "raw", f_name)
 
         if f_name and os.path.exists(pdf_path):
             try:
-                # Re-render inside the fragment to ensure it displays correctly after rerun
                 img = render_pdf_page_image(pdf_path, page_num)
                 if img:
-                    st.image(img, caption=f"Source: {f_name} (Page {page_num})", use_container_width=True)
+                    # Create columns to shrink the image size (e.g., image in col1, nothing in col2)
+                    c1, c2 = st.columns([1, 1]) 
+                    with c1:
+                        st.image(img, width=400, ) # Fixed width for a smaller look
+                        st.caption(f"📄 {f_name} | Page {page_num}")
                 else:
                     st.warning("Could not render page image.")
             except Exception as e:
