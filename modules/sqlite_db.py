@@ -32,14 +32,6 @@ def init_db_sqlite(db_file: str):
         )
     """)
 
-    # --- SCHEMA MIGRATION ---
-    cursor.execute("PRAGMA table_info(chats)")
-    columns = [column[1] for column in cursor.fetchall()]
-    if "title" not in columns:
-        cursor.execute("ALTER TABLE chats ADD COLUMN title TEXT DEFAULT 'New Chat'")
-    if "user_id" not in columns:
-        cursor.execute("ALTER TABLE chats ADD COLUMN user_id INTEGER DEFAULT 1")
-
     # 3. MESSAGES
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -110,7 +102,6 @@ def update_chat_title_sqlite(db_file: str, chat_id: int, new_title: str):
 def load_all_chats_sqlite(db_file: str, user_id: int, subject_name: str):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    # Isolates chats by BOTH user and subject
     cursor.execute("""
         SELECT id, model_name, created_at, title 
         FROM chats 
@@ -121,10 +112,14 @@ def load_all_chats_sqlite(db_file: str, user_id: int, subject_name: str):
     conn.close()
     return rows
 
-def delete_chat_sqlite(db_file: str, chat_id: int):
+def delete_chat_sqlite(db_file: str, chat_id: int, user_id: int): 
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+    cursor.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+    cursor.execute(
+        "DELETE FROM chats WHERE id = ? AND user_id = ?", 
+        (chat_id, user_id)
+    )
     conn.commit()
     conn.close()
 
@@ -193,22 +188,51 @@ def file_exists_sqlite(db_file, subject, filename):
 
 # --- CLEANUP FUNCTIONS ---
 
-def delete_subject_sqlite(db_file: str, subject_name: str, subject_dir: str = None):
+def delete_subject_sqlite(db_file, user_id, subject_name, subject_dir=None):
+    import sqlite3
+    import shutil
+    import os
+
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     try:
-        cursor.execute("PRAGMA foreign_keys = ON;") 
-        cursor.execute("DELETE FROM subjects WHERE name = ?", (subject_name,))
+        # 1. DELETE CHILD RECORDS (Chats & Messages)
+        # Using 'subject_name' as defined in your CHATS table
+        cursor.execute(
+            "SELECT id FROM chats WHERE user_id = ? AND subject_name = ?", 
+            (user_id, subject_name)
+        )
+        chat_ids = [row[0] for row in cursor.fetchall()]
+
+        for c_id in chat_ids:
+            cursor.execute("DELETE FROM messages WHERE chat_id = ?", (c_id,))
+
+        cursor.execute(
+            "DELETE FROM chats WHERE user_id = ? AND subject_name = ?", 
+            (user_id, subject_name)
+        )
+
+        # 2. DELETE FROM RAG_DOCS
+        # Using 'rag_docs' table name and 'subject_name' column
+        cursor.execute(
+            "DELETE FROM rag_docs WHERE user_id = ? AND subject_name = ?", 
+            (user_id, subject_name)
+        )
+
+        # 3. DELETE THE SUBJECT
+        # Using 'name' column as defined in your SUBJECTS table
+        cursor.execute(
+            "DELETE FROM subjects WHERE name = ? AND user_id = ?", 
+            (subject_name, user_id)
+        )
+        
         conn.commit()
     finally:
         conn.close()
-    
-    try:
-        clear_subject_stats(subject_name)
-    except Exception as e:
-        print(f"Error clearing statistics for {subject_name}: {e}")
 
+    # 4. PHYSICAL CLEANUP
     if subject_dir:
+        # Path: modules/subjects/user_{id}/{subject_name}
         path = os.path.join(subject_dir, subject_name) 
         if os.path.isdir(path):
             try:

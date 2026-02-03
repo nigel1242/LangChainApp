@@ -13,10 +13,12 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 # --- Local Module Imports ---
 from modules.db_manager import DBManager 
 from modules.functions import (
+    OllamaEmbeddings,
+    OpenAIEmbeddings,
     rebuild_rag_index
 )
 from modules.login import check_authentication, login_page, logout
-from modules.quizstats.file_utils import save_uploaded_files, render_pdf_page_image
+from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, save_uploaded_files, render_pdf_page_image
 from modules.quizstats.quiz_engine import build_quiz_from_rag
 from modules.quizstats.progress_store import init_stats_db, record_attempt
 
@@ -43,6 +45,9 @@ is_authenticated, username = check_authentication()
 if not is_authenticated:
     login_page()
     st.stop()
+    
+USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
+os.makedirs(USER_DATA_ROOT, exist_ok=True)
 
 def thread_wrapper(fn, ctx, *args, **kwargs):
     """Injects the Streamlit context into the thread before running the function."""
@@ -67,6 +72,12 @@ if "quiz_state" not in st.session_state:
 S = st.session_state.quiz_state
 init_stats_db()
 st.title("📖 Quiz Builder")
+
+# ---------- SIDEBAR ----------
+with st.sidebar:
+    st.markdown(f"**User: {username}**")
+    if st.button("Logout"): logout(); st.rerun()
+    st.markdown("---")
 
 # ---------- MODELS ----------
 MODEL_MAP = {
@@ -136,116 +147,108 @@ if os.path.exists(index_path):
 else:
     st.error(f"⚠️ Please upload files and click 'Process RAG' below.")
 
-# ---------- SIDEBAR ----------
-with st.sidebar:
-    st.markdown(f"**User: {username}**")
-    if st.button("Logout"): logout(); st.rerun()
-    st.markdown("---")
 
-# ---------- FILE PROCESSING (EXACT CHAT LOGIC) ----------
+
+# ---------- FILE PROCESSING ----------
 with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
-    uploaded_files = st.file_uploader(
-        "Add files", 
-        type=["txt", "pdf", "docx", "pptx", "csv"], 
-        accept_multiple_files=True
-    )
-    
-    if st.button("📂 Process RAG"):
-        target_sub = S["selected_subject"]
+    # 1. Subject Restriction from Chat.py
+    if S['selected_subject'] == "General":
+        st.info("💡 **Note:** You cannot upload documents to the 'General' subject. Create a new subject in the sidebar first.")
+    else:
+        uploaded_files = st.file_uploader(
+            "Add files", 
+            type=["pdf", "docx", "pptx"], 
+            accept_multiple_files=True
+        )
         
-        if uploaded_files:
-            raw_dir = os.path.join(SUBJECTS_DIR, f"user_{user_id}", target_sub, "raw")
-            os.makedirs(raw_dir, exist_ok=True)
-            existing_filenames = os.listdir(raw_dir)
+        if st.button("📂 Process RAG"):
+            target_sub = S["selected_subject"]
             
-            # Availability Flags
-            use_openai = bool(st.session_state.openai_api_key)
-            use_ollama = True 
-
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            msg_placeholder = st.empty() # For duplicate alerts
-            
-            # Ensure Splitter is available
-            qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-
-            for i, f in enumerate(uploaded_files):
-                # Update Progress
-                percent_val = (i + 1) / len(uploaded_files)
-                progress_bar.progress(percent_val)
+            if uploaded_files:
+                # 2. Path Construction from Chat.py
+                raw_dir = os.path.join(USER_DATA_ROOT, target_sub, "raw")
+                os.makedirs(raw_dir, exist_ok=True)
+                existing_filenames = os.listdir(raw_dir)
                 
-                # --- DUPLICATE CHECK ---
-                if f.name in existing_filenames:
-                    msg_placeholder.warning(f"⚠️ {f.name} already exists. Skipping...")
-                    time.sleep(1.5) # Brief pause so user can read it
-                    msg_placeholder.empty()
-                    continue 
+                # Availability Flags
+                use_openai = bool(st.session_state.openai_api_key)
+                use_ollama = True
 
-                # --- NEW FILE PROCESSING ---
-                status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 
-                f.seek(0)
-                save_uploaded_files(target_sub, [f], user_id=user_id)
-                original_path = os.path.join(raw_dir, f.name)
-                
-                # Convert PPTX/DOCX to PDF
-                ext = f.name.split('.')[-1].lower()
-                final_path = original_path
-                if ext in ["pptx", "docx"]:
-                    from modules.quizstats.file_utils import convert_to_pdf
-                    pdf_path = convert_to_pdf(original_path)
-                    if pdf_path and pdf_path != original_path:
-                        final_path = pdf_path
-                        try: os.remove(original_path)
-                        except: pass
-                
-                from modules.quizstats.file_utils import extract_text_from_path
-                content = extract_text_from_path(final_path)
-                final_filename = os.path.basename(final_path)
+                qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
-                # --- PATH A: FAISS ---
-                if st.session_state.vector_db == "faiss":
-                    if use_ollama:
-                        db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
-                                       content=content, metadata={"engine": "ollama"})
-                    if use_openai:
-                        db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
-                                       content=content, metadata={"engine": "openai"})
+                for i, f in enumerate(uploaded_files):
+                    # Update Progress
+                    percent_val = (i + 1) / len(uploaded_files)
+                    progress_bar.progress(percent_val)
+                    
+                    # --- DUPLICATE CHECK (Silent Skip as per Chat.py) ---
+                    if f.name in existing_filenames:
+                        continue
 
-                # --- PATH B: QDRANT ---
-                elif st.session_state.vector_db == "qdrant":
-                    from langchain_community.embeddings import OllamaEmbeddings, OpenAIEmbeddings
-                    chunks = qdrant_splitter.split_text(content)
-                    for chunk_text in chunks:
+                    # --- NEW FILE PROCESSING ---
+                    status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
+                    
+                    f.seek(0)
+                    save_uploaded_files(target_sub, [f], user_id=user_id)
+                    original_path = os.path.join(raw_dir, f.name)
+                    
+                    # Convert PPTX/DOCX to PDF
+                    ext = f.name.split('.')[-1].lower()
+                    final_path = original_path
+                    if ext in ["pptx", "docx"]:
+                        pdf_path = convert_to_pdf(original_path)
+                        if pdf_path and pdf_path != original_path:
+                            final_path = pdf_path
+                            try: os.remove(original_path)
+                            except: pass
+                    
+                    content = extract_text_from_path(final_path)
+                    final_filename = os.path.basename(final_path)
+
+                    # --- PATH A: FAISS ---
+                    if st.session_state.vector_db == "faiss":
                         if use_ollama:
-                            ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-                            v_ollama = ollama_embedder.embed_query(chunk_text)
-                            db.add_rag_doc(target_id=target_sub, file_name=final_filename,
-                                           content=chunk_text, vector_data=v_ollama,
-                                           metadata={"engine": "ollama"})
+                            db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
+                                           content=content, metadata={"engine": "ollama"})
                         if use_openai:
-                            openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
-                                                               api_key=st.session_state.openai_api_key)
-                            v_openai = openai_embedder.embed_query(chunk_text)
-                            db.add_rag_doc(target_id=target_sub, file_name=final_filename,
-                                           content=chunk_text, vector_data=v_openai,
-                                           metadata={"engine": "openai"})
+                            db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
+                                           content=content, metadata={"engine": "openai"})
 
-            # --- FINAL FAISS SYNC ---
-            if st.session_state.vector_db == "faiss":
-                subject_path = os.path.join(SUBJECTS_DIR, f"user_{user_id}", target_sub)
-                index_path = os.path.join(subject_path, f"index_{suffix}.faiss")
-                if use_ollama:
-                    status_text.text("🔄 Rebuilding Ollama FAISS index...")
-                    rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
-                                        ollama_models, openai_models, suffix="ollama", user_id=user_id)
-                if use_openai:
-                    status_text.text("🔄 Rebuilding OpenAI FAISS index...")
-                    rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
-                                        ollama_models, openai_models, suffix="openai", user_id=user_id)
-            st.success(f"✅ Knowledge Base Processed!")
-            time.sleep(2)
-            st.rerun()
+                    # --- PATH B: QDRANT ---
+                    elif st.session_state.vector_db == "qdrant":
+                        chunks = qdrant_splitter.split_text(content)
+                        for chunk_text in chunks:
+                            if use_ollama:
+                                ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+                                v_ollama = ollama_embedder.embed_query(chunk_text)
+                                db.add_rag_doc(target_id=target_sub, file_name=final_filename,
+                                               content=chunk_text, vector_data=v_ollama,
+                                               metadata={"engine": "ollama"})
+                            if use_openai:
+                                openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
+                                                                   api_key=st.session_state.openai_api_key)
+                                v_openai = openai_embedder.embed_query(chunk_text)
+                                db.add_rag_doc(target_id=target_sub, file_name=final_filename,
+                                               content=chunk_text, vector_data=v_openai,
+                                               metadata={"engine": "openai"})
+
+                # --- FINAL FAISS SYNC ---
+                if st.session_state.vector_db == "faiss":
+                    subject_path = os.path.join(USER_DATA_ROOT, target_sub)
+                    if use_ollama:
+                        status_text.text("🔄 Rebuilding Ollama FAISS index...")
+                        rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
+                                            ollama_models, openai_models, suffix="ollama", user_id=user_id)
+                    if use_openai:
+                        status_text.text("🔄 Rebuilding OpenAI FAISS index...")
+                        rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
+                                            ollama_models, openai_models, suffix="openai", user_id=user_id)
+                st.success(f"✅ Knowledge Base Processed!")
+                time.sleep(2)
+                st.rerun()
             
 # ---------- QUIZ GENERATION ----------
 if st.button("🎲 Generate 10 Questions"):
