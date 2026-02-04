@@ -10,8 +10,7 @@ from datetime import datetime, timedelta
 DB = "users.db"
 TOKEN_FILE = ".session_token"
 
-
-# ------------------- DATABASE -------------------
+# ---------------- Database ----------------
 def init_db():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
@@ -37,11 +36,16 @@ def init_db():
     conn.commit()
     conn.close()
 
+def cleanup_expired_sessions():
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM sessions WHERE datetime(expires_at) < datetime('now')")
+    conn.commit()
+    conn.close()
 
-# ------------------- PASSWORD & EMAIL -------------------
+# ---------------- Password ----------------
 def hash_password(password, salt):
     return hashlib.sha256((password + salt).encode()).hexdigest()
-
 
 def validate_password(password):
     if len(password) < 8:
@@ -54,27 +58,22 @@ def validate_password(password):
         return False, "Password must contain at least 1 symbol (@, !, etc.)"
     return True, ""
 
-
 def validate_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-
-# ------------------- USER MANAGEMENT -------------------
+# ---------------- Users ----------------
 def create_user(username, email, password):
     if len(username) < 3:
         return False, "Username must be at least 3 characters"
-    
     if not validate_email(email):
         return False, "Invalid email address"
-    
     is_valid, error_msg = validate_password(password)
     if not is_valid:
         return False, error_msg
 
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
-
     salt = secrets.token_hex(16)
     pwd_hash = hash_password(password, salt)
 
@@ -94,7 +93,6 @@ def create_user(username, email, password):
     finally:
         conn.close()
 
-
 def verify_user(username, password):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
@@ -110,7 +108,6 @@ def verify_user(username, password):
         return user_id
     return None
 
-
 def get_username(user_id):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
@@ -119,8 +116,7 @@ def get_username(user_id):
     conn.close()
     return row[0] if row else None
 
-
-# ------------------- SESSION MANAGEMENT -------------------
+# ---------------- Sessions ----------------
 def create_session(user_id, remember):
     token = secrets.token_urlsafe(32)
     expires = datetime.now() + (timedelta(days=7) if remember else timedelta(days=1))
@@ -138,7 +134,6 @@ def create_session(user_id, remember):
         save_token_to_file(token)
 
     return token
-
 
 def get_session():
     token = get_token_from_file()
@@ -164,7 +159,6 @@ def get_session():
 
     return user_id
 
-
 def delete_session(token):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
@@ -174,15 +168,6 @@ def delete_session(token):
     
     clear_token_file()
 
-
-def cleanup_expired_sessions():
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    cur.execute("DELETE FROM sessions WHERE datetime(expires_at) < datetime('now')")
-    conn.commit()
-    conn.close()
-
-
 def save_token_to_file(token):
     try:
         with open(TOKEN_FILE, 'w') as f:
@@ -191,7 +176,6 @@ def save_token_to_file(token):
             os.chmod(TOKEN_FILE, 0o600)
     except Exception as e:
         print(f"Error saving token: {e}")
-
 
 def get_token_from_file():
     try:
@@ -203,7 +187,6 @@ def get_token_from_file():
         pass
     return None
 
-
 def clear_token_file():
     try:
         if os.path.exists(TOKEN_FILE):
@@ -211,7 +194,7 @@ def clear_token_file():
     except Exception as e:
         print(f"Error clearing token: {e}")
 
-
+# ---------------- Authentication ----------------
 def check_authentication():
     if st.session_state.get("authenticated", False):
         return True, st.session_state.get("username")
@@ -229,8 +212,7 @@ def check_authentication():
     
     return False, None
 
-
-# ------------------- UI -------------------
+# ---------------- UI ----------------
 def login_page():
     init_db()
     cleanup_expired_sessions()
@@ -256,12 +238,9 @@ def login_page():
                         st.session_state.update({
                             "authenticated": True,
                             "user_id": user_id,
-                            "username": username,
-                            "_rerun_flag": True
+                            "username": username
                         })
                         st.success(f"Welcome back, {username}!")
-                    else:
-                        st.error("Invalid username or password")
 
     # ---------- SIGNUP ----------
     with tab_signup:
@@ -286,15 +265,10 @@ def login_page():
                     else:
                         st.error(message)
 
-    # ---------- SAFE RERUN ----------
-    if st.session_state.get("_rerun_flag"):
-        st.session_state["_rerun_flag"] = False
-        st.experimental_rerun()
-
-
+# ---------------- Logout ----------------
 def logout():
     token = get_token_from_file()
     if token:
         delete_session(token)
+    
     st.session_state.clear()
-    st.experimental_rerun()
