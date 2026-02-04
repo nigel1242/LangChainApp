@@ -12,15 +12,26 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = BASE_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
 
-QDRANT_URL = os.getenv("QDRANT_URL")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+def get_qdrant_client():
+    """
+    Dynamically initializes the Qdrant client.
+    Prioritizes Cloud environment variables, fallbacks to localhost for local dev.
+    """
+    # Use environment variables if they exist (Deployment), otherwise use localhost
+    url = os.getenv("QDRANT_URL", "http://localhost:6333")
+    api_key = os.getenv("QDRANT_API_KEY", None)
+    
+    # ✅ prefer_grpc=False is critical for stable HTTPS connections on Qdrant Cloud
+    # Increased timeout to 10s to account for cloud latency
+    return QdrantClient(
+        url=url,
+        api_key=api_key,
+        prefer_grpc=False,
+        timeout=10
+    )
 
-# ✅ prefer_grpc=False is critical for stable HTTPS connections on Qdrant Cloud
-client = QdrantClient(
-    url=QDRANT_URL,
-    api_key=QDRANT_API_KEY,
-    prefer_grpc=False 
-)
+# Global client instance
+client = get_qdrant_client()
 
 # ------------------ Constants ------------------
 CHAT_COLLECTION = "chats_meta"
@@ -47,20 +58,14 @@ def ensure_collection_exists(collection_name: str, vector_size: int = None):
         )
         
     # --- AUTO-INDEXING FOR CLOUD COMPATIBILITY ---
-    # These indexes prevent "Index required but not found" errors during filtered operations.
-    
     if collection_name == CHAT_COLLECTION:
-        # Index 'subject' for listing chats by subject
         client.create_payload_index(collection_name, "subject", "keyword")
         
     elif collection_name == MESSAGE_COLLECTION:
-        # CRITICAL: Index 'chat_id' to allow deleting all messages for a specific chat
         client.create_payload_index(collection_name, "chat_id", "keyword")
         
     elif collection_name.startswith(DOC_COLLECTION_PREFIX):
-        # Index 'subject_name' for RAG searches
         client.create_payload_index(collection_name, "subject_name", "keyword")
-        # NEW: Index 'chat_id' for document collections to support chat-linked RAG cleanup
         client.create_payload_index(collection_name, "chat_id", "keyword")
 
 # ------------------ Subjects ------------------
@@ -87,7 +92,6 @@ def load_all_subjects_qdrant():
     return sorted(list(subjects))
 
 def create_subject_meta_qdrant(subject_name: str):
-    """Creates a placeholder point so a new subject appears in the UI."""
     meta_col = f"{DOC_COLLECTION_PREFIX}_metadata"
     ensure_collection_exists(meta_col, vector_size=1)
     try:
@@ -137,7 +141,6 @@ def load_all_chats_qdrant(subject_name: str):
             limit=100,
             with_payload=True
         )
-        # Returns: (id, model_name, created_at, title)
         return [(p.id, p.payload.get("model_name"), p.payload.get("created_at"), p.payload.get("title", "New Chat")) for p in points]
     except Exception: return []
 
@@ -194,17 +197,11 @@ def add_rag_doc_qdrant(subject_name: str, file_name: str, vector_data: list, con
         return False, str(e)
 
 def file_exists_qdrant(subject_name: str, file_name: str, vector_size: int) -> bool:
-    """
-    Checks if a file has already been indexed in a specific Qdrant collection.
-    """
     collection_name = get_doc_collection_name(vector_size)
-    
-    # 1. Verify collection exists before querying
     existing = [c.name for c in client.get_collections().collections]
     if collection_name not in existing:
         return False
 
-    # 2. Filter search for subject + filename
     result = client.scroll(
         collection_name=collection_name,
         scroll_filter=qmodels.Filter(
@@ -213,25 +210,17 @@ def file_exists_qdrant(subject_name: str, file_name: str, vector_size: int) -> b
                 qmodels.FieldCondition(key="file_name", match=qmodels.MatchValue(value=file_name))
             ]
         ),
-        limit=1, # We only need to find one record to confirm it exists
+        limit=1,
         with_payload=False
     )
-    
-    # Scroll returns a tuple of (points, next_page_offset)
     return len(result[0]) > 0
 
 # ------------------ Cleanup ------------------
 def delete_chat_qdrant(chat_id: str):
-    """Deletes only the chat metadata and its messages."""
     delete_filter = qmodels.Filter(
         must=[qmodels.FieldCondition(key="chat_id", match=qmodels.MatchValue(value=chat_id))]
     )
-    
-    # 1. Delete the chat entry from metadata collection
     client.delete(collection_name=CHAT_COLLECTION, points_selector=[chat_id])
-    
-    # 2. Delete all messages associated with this chat
-    # This requires the "chat_id" index which is created in ensure_collection_exists
     try:
         client.delete(
             collection_name=MESSAGE_COLLECTION, 
@@ -240,19 +229,13 @@ def delete_chat_qdrant(chat_id: str):
     except Exception as e:
         print(f"Qdrant Message Delete Error: {e}")
 
-    # NOTE: Do NOT loop through DOC_COLLECTION_PREFIX here. 
-    # RAG docs belong to the Subject, not the Chat.
-
 def delete_subject_qdrant(subject_name: str):
-    # 1. Find all Chat IDs for this subject (needed to delete messages)
     chat_filter = qmodels.Filter(
         must=[qmodels.FieldCondition(key="subject", match=qmodels.MatchValue(value=subject_name))]
     )
-
     chat_ids = []
     offset = None
     while True:
-        # Scroll through CHAT_COLLECTION to get all point IDs (chat_ids)
         records, offset = client.scroll(
             collection_name=CHAT_COLLECTION,
             scroll_filter=chat_filter,
@@ -264,9 +247,7 @@ def delete_subject_qdrant(subject_name: str):
             chat_ids.append(r.id)
         if offset is None: break
 
-    # 2. Delete Messages in MESSAGE_COLLECTION
     if chat_ids:
-        # We use MatchAny to delete messages for all chats of this subject at once
         msg_filter = qmodels.Filter(
             must=[qmodels.FieldCondition(key="chat_id", match=qmodels.MatchAny(any=chat_ids))]
         )
@@ -275,13 +256,11 @@ def delete_subject_qdrant(subject_name: str):
             points_selector=qmodels.FilterSelector(filter=msg_filter)
         )
 
-    # 3. Delete Chats in CHAT_COLLECTION
     client.delete(
         collection_name=CHAT_COLLECTION, 
         points_selector=qmodels.FilterSelector(filter=chat_filter)
     )
 
-    # 4. Delete RAG Docs & Metadata across all "rag_docs_..." collections
     doc_filter = qmodels.Filter(
         must=[qmodels.FieldCondition(key="subject_name", match=qmodels.MatchValue(value=subject_name))]
     )
@@ -296,5 +275,4 @@ def delete_subject_qdrant(subject_name: str):
                 )
             except Exception as e:
                 print(f"[qdrant_db] Could not delete subject points from {col.name}: {e}")
-
     return True
