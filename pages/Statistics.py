@@ -94,11 +94,129 @@ def build_topic_alias_map(topics: list[str], threshold: float = 0.88) -> dict[st
     return alias
 
 
+# ============================================================
+#   MATH RENDERING FIXES (similar to quiz_engine.py)
+# ============================================================
+_LATEX_TRIGGERS = (
+    r"\frac",
+    r"\dfrac",
+    r"\tfrac",
+    r"\left",
+    r"\right",
+    r"\sin",
+    r"\cos",
+    r"\tan",
+    r"\ln",
+    r"\log",
+    r"\sqrt",
+    r"\int",
+    r"\sum",
+    r"\lim",
+    r"\mathcal",
+    r"\cdot",
+    r"\times",
+    r"\pm",
+)
+
+
+def _looks_like_math(s: str) -> bool:
+    t = (s or "").strip()
+    if not t:
+        return False
+
+    if "$" in t:
+        return True
+
+    for trig in _LATEX_TRIGGERS:
+        if trig in t:
+            return True
+
+    if re.search(r"[\^_]", t):
+        return True
+    if re.search(r"[=<>]", t):
+        return True
+
+    if re.search(r"\b(s|t|x|y|r)\b", t) and re.search(r"\d", t):
+        return True
+
+    return False
+
+
+def _ensure_math_wrapped_if_needed(text: str) -> str:
+    """
+    Streamlit renders LaTeX only inside $...$ (in markdown).
+    If the text is mathy and not already wrapped, wrap the WHOLE expression.
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if "$" in t:
+        return t
+    return f"${t}$" if _looks_like_math(t) else t
+
+
+def _normalize_math_text(text: str) -> str:
+    """
+    Make math display-friendly for Streamlit:
+    - Collapse double-escaped backslashes (\\frac -> \frac)
+    - Convert \( \) and \[ \] to $...$
+    - Best-effort convert short a/b-style fractions to \frac{a}{b}
+    """
+    if not text:
+        return ""
+
+    out = str(text)
+
+    # If stored as "\\frac{1}{s}", display needs "\frac{1}{s}"
+    out = out.replace("\\\\", "\\")
+
+    # Normalize \(...\) and \[...\] to $...$
+    out = re.sub(r"\\\((.*?)\\\)", r"$\1$", out, flags=re.DOTALL)
+    out = re.sub(r"\\\[(.*?)\\\]", r"$\1$", out, flags=re.DOTALL)
+
+    # Replace common "a/b" style with \frac{a}{b} (conservative)
+    if "/" in out and "\\" not in out and "$" not in out:
+        if len(out.strip()) <= 80 and re.search(r"[A-Za-z0-9\)\]]\s*/\s*[\(\[]", out):
+            out2 = re.sub(
+                r"^\s*\(?\s*([A-Za-z0-9\^\_\+\-\s\(\)]+)\s*\)?\s*/\s*\(?\s*([A-Za-z0-9\^\_\+\-\s\(\)]+)\s*\)?\s*$",
+                r"\\frac{\1}{\2}",
+                out.strip(),
+            )
+            out = out2
+
+    # Optional extra normalizations
+    out = re.sub(r"\bL\{([^}]+)\}", r"\\mathcal{L}{\{\1\}}", out)
+    out = re.sub(r"\bsqrt\(([^)]+)\)", r"\\sqrt{\1}", out)
+
+    return out.strip()
+
+
+def _format_choice_like_quiz_engine(s: str) -> str:
+    """
+    Keep labels like 'A) ' outside math, but make the remainder renderable.
+    """
+    raw = (s or "").strip()
+    if not raw:
+        return ""
+
+    m = re.match(r"^([ABCD])\s*[\)\.\-:]\s*(.*)$", raw, flags=re.IGNORECASE)
+    if not m:
+        cleaned = _normalize_math_text(raw)
+        return _ensure_math_wrapped_if_needed(cleaned)
+
+    lab = m.group(1).upper() + ") "
+    rest = (m.group(2) or "").strip()
+    rest = _normalize_math_text(rest)
+    rest = _ensure_math_wrapped_if_needed(rest)
+    return lab + rest
+
+
 # ------------------ INIT ------------------
 def init_page():
     init_stats_db()
     user_id = st.session_state.get("user_id")
     return DBManager(backend="sqlite", user_id=user_id, db_file=CHAT_DB_FILE)
+
 
 db = init_page()
 
@@ -156,17 +274,11 @@ for col in cols:
 # ---- ts_ms cleaning (DON'T DROP if missing/0; FIX it) ----
 df["ts_ms"] = pd.to_numeric(df["ts_ms"], errors="coerce")
 
-# if missing timestamps exist, fill forward; if still missing, use "now"
 now_ms = int(datetime.now().timestamp() * 1000)
 df["ts_ms"] = df["ts_ms"].fillna(0)
 
-# convert 0 -> NaN so ffill works
 df.loc[df["ts_ms"] <= 0, "ts_ms"] = pd.NA
-
-# fill from previous valid timestamp
 df["ts_ms"] = df["ts_ms"].ffill()
-
-# if still missing (e.g., all were missing), fill with now
 df["ts_ms"] = df["ts_ms"].fillna(now_ms).astype("int64")
 
 # ---- only drop truly empty questions ----
@@ -182,6 +294,7 @@ if df.empty:
 
 df["datetime"] = df["ts_ms"].apply(lambda ms: datetime.fromtimestamp(ms / 1000.0).strftime("%Y-%m-%d %H:%M"))
 df["correct_bool"] = pd.to_numeric(df["is_correct"], errors="coerce").fillna(0).astype(int) == 1
+
 
 # Handle Topic Fallbacks
 def get_clean_topic(row):
@@ -202,6 +315,11 @@ df["topic"] = df["topic"].astype(str).map(lambda x: alias.get(x, x))
 df["q_index"] = df.index + 1
 df["attempt_id"] = ((df["q_index"] - 1) // QUESTIONS_PER_ATTEMPT) + 1
 df["q_in_attempt"] = ((df["q_index"] - 1) % QUESTIONS_PER_ATTEMPT) + 1
+
+# ------------------ DISPLAY-FRIENDLY (LaTeX) COLUMNS ------------------
+df["question_disp"] = df["question"].map(lambda x: _normalize_math_text(str(x)))
+df["chosen_disp"] = df["chosen"].map(lambda x: _format_choice_like_quiz_engine(str(x)))
+df["correct_disp"] = df["correct"].map(lambda x: _format_choice_like_quiz_engine(str(x)))
 
 # ------------------ VISIBILITY CONTROLS ------------------
 max_attempt = int(df["attempt_id"].max())
@@ -264,16 +382,40 @@ mistakes = df_scope[df_scope["correct_bool"] == False].sort_values("ts_ms", asce
 if mistakes.empty:
     st.success("No mistakes found! Keep it up.")
 else:
-    view_cols = ["datetime", "attempt_id", "topic", "question", "chosen", "correct"]
-    st.dataframe(
-        mistakes[view_cols].rename(
-            columns={
-                "datetime": "Time",
-                "attempt_id": "Attempt ",
-                "chosen": "Your Answer",
-                "correct": "Correct Answer",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+    render_math = st.toggle("Detailed View", value=True)
+
+    if not render_math:
+        view_cols = ["datetime", "attempt_id", "topic", "question", "chosen", "correct"]
+        st.dataframe(
+            mistakes[view_cols].rename(
+                columns={
+                    "datetime": "Time",
+                    "attempt_id": "Attempt",
+                    "chosen": "Your Answer",
+                    "correct": "Correct Answer",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        for _, r in mistakes.iterrows():
+            time_txt = str(r.get("datetime", ""))
+            att_id = str(r.get("attempt_id", ""))
+            topic = str(r.get("topic", ""))
+
+            q = str(r.get("question_disp", r.get("question", "")))
+            chosen = str(r.get("chosen_disp", r.get("chosen", "")))
+            correct = str(r.get("correct_disp", r.get("correct", "")))
+
+            with st.expander(f"{time_txt}  |  Attempt {att_id}  |  {topic}"):
+                st.markdown("**Question:**")
+                st.markdown(q)
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**Your Answer:**")
+                    st.markdown(chosen)
+                with c2:
+                    st.markdown("**Correct Answer:**")
+                    st.markdown(correct)
