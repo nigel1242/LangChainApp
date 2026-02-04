@@ -7,13 +7,12 @@ import os
 import re
 from datetime import datetime, timedelta
 
-# ---------------- Constants ----------------
-DB = "users.db"  # will be created if not exists
-TOKEN_FILE = ".session_token"  # optional, used only for local persistent sessions
+DB = "users.db"
+TOKEN_FILE = ".session_token"
 
-# ---------------- Database Initialization ----------------
+
+# ------------------- DATABASE -------------------
 def init_db():
-    os.makedirs(os.path.dirname(DB) or ".", exist_ok=True)
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
 
@@ -38,9 +37,11 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ---------------- Password & Email ----------------
+
+# ------------------- PASSWORD & EMAIL -------------------
 def hash_password(password, salt):
     return hashlib.sha256((password + salt).encode()).hexdigest()
+
 
 def validate_password(password):
     if len(password) < 8:
@@ -53,22 +54,27 @@ def validate_password(password):
         return False, "Password must contain at least 1 symbol (@, !, etc.)"
     return True, ""
 
+
 def validate_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# ---------------- User Management ----------------
+
+# ------------------- USER MANAGEMENT -------------------
 def create_user(username, email, password):
     if len(username) < 3:
         return False, "Username must be at least 3 characters"
+    
     if not validate_email(email):
         return False, "Invalid email address"
+    
     is_valid, error_msg = validate_password(password)
     if not is_valid:
         return False, error_msg
 
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
+
     salt = secrets.token_hex(16)
     pwd_hash = hash_password(password, salt)
 
@@ -88,18 +94,22 @@ def create_user(username, email, password):
     finally:
         conn.close()
 
+
 def verify_user(username, password):
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT id, password_hash, salt FROM users WHERE username = ?", (username,))
     row = cur.fetchone()
     conn.close()
+
     if not row:
         return None
+
     user_id, stored_hash, salt = row
     if stored_hash == hash_password(password, salt):
         return user_id
     return None
+
 
 def get_username(user_id):
     conn = sqlite3.connect(DB)
@@ -109,10 +119,12 @@ def get_username(user_id):
     conn.close()
     return row[0] if row else None
 
-# ---------------- Sessions ----------------
-def create_session(user_id, remember=False):
+
+# ------------------- SESSION MANAGEMENT -------------------
+def create_session(user_id, remember):
     token = secrets.token_urlsafe(32)
     expires = datetime.now() + (timedelta(days=7) if remember else timedelta(days=1))
+
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute(
@@ -121,30 +133,15 @@ def create_session(user_id, remember=False):
     )
     conn.commit()
     conn.close()
-    # Only save to file locally
-    if remember and os.name == 'nt':
-        try:
-            with open(TOKEN_FILE, 'w') as f:
-                json.dump({'token': token}, f)
-            os.chmod(TOKEN_FILE, 0o600)
-        except Exception as e:
-            print(f"Error saving token: {e}")
+
+    if remember:
+        save_token_to_file(token)
+
     return token
 
+
 def get_session():
-    # Prefer live session
-    if st.session_state.get("user_id"):
-        return st.session_state["user_id"]
-
-    # Fallback: file-based token (Windows / local)
-    token = None
-    if os.name == 'nt' and os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, 'r') as f:
-                data = json.load(f)
-                token = data.get("token")
-        except: pass
-
+    token = get_token_from_file()
     if not token:
         return None
 
@@ -155,13 +152,18 @@ def get_session():
     conn.close()
 
     if not row:
+        clear_token_file()
         return None
 
     user_id, expires = row
-    if datetime.now() > datetime.fromisoformat(expires):
+    expires = datetime.fromisoformat(expires)
+
+    if datetime.now() > expires:
         delete_session(token)
         return None
+
     return user_id
+
 
 def delete_session(token):
     conn = sqlite3.connect(DB)
@@ -169,8 +171,9 @@ def delete_session(token):
     cur.execute("DELETE FROM sessions WHERE token = ?", (token,))
     conn.commit()
     conn.close()
-    if os.path.exists(TOKEN_FILE):
-        os.remove(TOKEN_FILE)
+    
+    clear_token_file()
+
 
 def cleanup_expired_sessions():
     conn = sqlite3.connect(DB)
@@ -179,23 +182,55 @@ def cleanup_expired_sessions():
     conn.commit()
     conn.close()
 
-# ---------------- Authentication ----------------
-def check_authentication():
-    # Live session check first
-    if st.session_state.get("authenticated") and st.session_state.get("username"):
-        return True, st.session_state["username"]
 
+def save_token_to_file(token):
+    try:
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump({'token': token}, f)
+        if os.name != 'nt':
+            os.chmod(TOKEN_FILE, 0o600)
+    except Exception as e:
+        print(f"Error saving token: {e}")
+
+
+def get_token_from_file():
+    try:
+        if os.path.exists(TOKEN_FILE):
+            with open(TOKEN_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get('token')
+    except:
+        pass
+    return None
+
+
+def clear_token_file():
+    try:
+        if os.path.exists(TOKEN_FILE):
+            os.remove(TOKEN_FILE)
+    except Exception as e:
+        print(f"Error clearing token: {e}")
+
+
+def check_authentication():
+    if st.session_state.get("authenticated", False):
+        return True, st.session_state.get("username")
+    
     user_id = get_session()
     if user_id:
         username = get_username(user_id)
         if username:
-            st.session_state["authenticated"] = True
-            st.session_state["user_id"] = user_id
-            st.session_state["username"] = username
+            st.session_state.update({
+                "authenticated": True,
+                "user_id": user_id,
+                "username": username
+            })
             return True, username
+    
     return False, None
 
-# ---------------- UI ----------------
+
+# ------------------- UI -------------------
 def login_page():
     init_db()
     cleanup_expired_sessions()
@@ -203,6 +238,7 @@ def login_page():
 
     tab_login, tab_signup = st.tabs(["Login", "Sign Up"])
 
+    # ---------- LOGIN ----------
     with tab_login:
         with st.form("login_form"):
             username = st.text_input("Username")
@@ -220,13 +256,14 @@ def login_page():
                         st.session_state.update({
                             "authenticated": True,
                             "user_id": user_id,
-                            "username": username
+                            "username": username,
+                            "_rerun_flag": True
                         })
                         st.success(f"Welcome back, {username}!")
-                        st.experimental_rerun()
                     else:
                         st.error("Invalid username or password")
 
+    # ---------- SIGNUP ----------
     with tab_signup:
         with st.form("signup_form"):
             new_username = st.text_input("Choose Username")
@@ -249,10 +286,15 @@ def login_page():
                     else:
                         st.error(message)
 
+    # ---------- SAFE RERUN ----------
+    if st.session_state.get("_rerun_flag"):
+        st.session_state["_rerun_flag"] = False
+        st.experimental_rerun()
+
+
 def logout():
-    token = None
-    if st.session_state.get("user_id"):
-        token = st.session_state.get("user_id")
-    delete_session(token)
+    token = get_token_from_file()
+    if token:
+        delete_session(token)
     st.session_state.clear()
     st.experimental_rerun()
