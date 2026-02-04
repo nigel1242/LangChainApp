@@ -38,8 +38,20 @@ if not is_authenticated:
 
 user_id = st.session_state.get("user_id")
 
+# --- API KEY RETRIEVAL (Strictly Database/Session) ---
+# These were populated in login.py during the auth check
+oa_key = st.session_state.get("openai_api_key", "").strip()
+q_url = st.session_state.get("qdrant_url", "").strip()
+q_key = st.session_state.get("qdrant_api_key", "").strip()
+
+# Sync to environment variables for background libraries that require them
+os.environ["OPENAI_API_KEY"] = oa_key
+os.environ["QDRANT_URL"] = q_url
+os.environ["QDRANT_API_KEY"] = q_key
+
+openai_functional = bool(oa_key)
+
 # ---------- POST-AUTH INITIALIZATION ----------
-# Initialize backend verification flag (matching chat.py pattern)
 if "backend_verified" not in st.session_state:
     st.session_state.backend_verified = False
 
@@ -53,11 +65,8 @@ db = DBManager(
 USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
 os.makedirs(USER_DATA_ROOT, exist_ok=True)
 
-# --- API KEY RETRIEVAL (Database First - matching chat.py) ---
-# Prioritize the keys pulled from users.db during login
+# --- API KEY RETRIEVAL ---
 oa_key = st.session_state.get("openai_api_key")
-if not oa_key:
-    oa_key = os.getenv("OPENAI_API_KEY", "").strip()
 
 st.session_state.openai_api_key = oa_key
 openai_functional = bool(oa_key)
@@ -189,14 +198,15 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
             target_sub = S["selected_subject"]
             
             if uploaded_files:
-                # 2. Path Construction from Chat.py
+                # 1. Path Construction
                 raw_dir = os.path.join(USER_DATA_ROOT, target_sub, "raw")
                 os.makedirs(raw_dir, exist_ok=True)
                 existing_filenames = os.listdir(raw_dir)
                 
-                # Availability Flags (using session state API key)
-                use_openai = bool(st.session_state.openai_api_key)
-                use_ollama = True
+                # 2. Availability Flags (Strictly using Session State from users.db)
+                oa_key = st.session_state.get("openai_api_key", "").strip()
+                use_openai = bool(oa_key)
+                use_ollama = True # Assuming Ollama is always an option locally
 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -204,35 +214,38 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
                 qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
                 for i, f in enumerate(uploaded_files):
-                    # Update Progress
                     percent_val = (i + 1) / len(uploaded_files)
                     progress_bar.progress(percent_val)
                     
-                    # --- DUPLICATE CHECK (Silent Skip as per Chat.py) ---
                     if f.name in existing_filenames:
                         continue
 
-                    # --- NEW FILE PROCESSING ---
                     status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
                     
+                    # Save file locally
                     f.seek(0)
                     save_uploaded_files(target_sub, [f], user_id=user_id)
                     original_path = os.path.join(raw_dir, f.name)
                     
-                    # Convert PPTX/DOCX to PDF
+                    # Convert to PDF if needed
                     ext = f.name.split('.')[-1].lower()
                     final_path = original_path
                     if ext in ["pptx", "docx"]:
                         pdf_path = convert_to_pdf(original_path)
-                        if pdf_path and pdf_path != original_path:
+                        if pdf_path:
                             final_path = pdf_path
-                            try: os.remove(original_path)
-                            except: pass
                     
+                    # Extract Text
                     content = extract_text_from_path(final_path)
+                    
+                    # --- CRITICAL SAFETY CHECK: Skip empty extractions to prevent OpenAI crash ---
+                    if not content or not content.strip():
+                        st.warning(f"⚠️ Could not extract text from {f.name}. Skipping...")
+                        continue
+
                     final_filename = os.path.basename(final_path)
 
-                    # --- PATH A: FAISS ---
+                    # --- PATH A: FAISS (Saves text to SQLite for later indexing) ---
                     if st.session_state.vector_db == "faiss":
                         if use_ollama:
                             db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
@@ -241,26 +254,54 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
                             db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
                                            content=content, metadata={"engine": "openai"})
 
-                # --- FINAL FAISS SYNC ---
+                    # --- PATH B: QDRANT (Immediate Vector Ingestion) ---
+                    elif st.session_state.vector_db == "qdrant":
+                        chunks = qdrant_splitter.split_text(content)
+                        for chunk_text in chunks:
+                            if not chunk_text.strip(): continue
+                            
+                            if use_ollama:
+                                ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+                                v_ollama = ollama_embedder.embed_query(chunk_text)
+                                db.add_rag_doc(target_id=target_sub, file_name=f.name,
+                                               content=chunk_text, vector_data=v_ollama,
+                                               metadata={"engine": "ollama"})
+                            if use_openai:
+                                openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
+                                                                   api_key=oa_key)
+                                v_openai = openai_embedder.embed_query(chunk_text)
+                                db.add_rag_doc(target_id=target_sub, file_name=f.name,
+                                               content=chunk_text, vector_data=v_openai,
+                                               metadata={"engine": "openai"})
+
+                # --- FINAL SYNC ---
                 if st.session_state.vector_db == "faiss":
                     subject_path = os.path.join(USER_DATA_ROOT, target_sub)
                     if use_ollama:
-                        status_text.text("🔄 Rebuilding Ollama FAISS index...")
+                        status_text.text("🔄 Syncing Ollama FAISS index...")
                         rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
-                                            ollama_models, openai_models, suffix="ollama", user_id=user_id)
+                                          ollama_models, openai_models, suffix="ollama", user_id=user_id)
                     if use_openai:
-                        status_text.text("🔄 Rebuilding OpenAI FAISS index...")
+                        status_text.text("🔄 Syncing OpenAI FAISS index...")
                         rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
-                                            ollama_models, openai_models, suffix="openai", user_id=user_id)
-                st.success(f"✅ Knowledge Base Processed!")
-                time.sleep(2)
+                                          ollama_models, openai_models, suffix="openai", user_id=user_id)
+                
+                st.success(f"✅ {target_sub} Knowledge Base Updated!")
+                time.sleep(1.5)
                 st.rerun()
             
 # ---------- QUIZ GENERATION ----------
 if st.button("🎲 Generate 10 Questions"):
-    if not os.path.exists(index_path):
+    # Updated logic: Check for local file if FAISS, or check connection if Qdrant
+    can_generate = True
+    if st.session_state.vector_db == "faiss" and not os.path.exists(index_path):
         st.error("Please Process & Sync files first.")
-    else:
+        can_generate = False
+    elif st.session_state.vector_db == "qdrant" and not st.session_state.get("backend_verified"):
+        st.error("Qdrant is not connected. Check your settings.")
+        can_generate = False
+
+    if can_generate:
         colA, colB = st.columns([3, 1])
         with colA:
             status_ph = st.empty()
@@ -276,8 +317,13 @@ if st.button("🎲 Generate 10 Questions"):
         # Capture the context of the current browser session
         ctx = get_script_run_ctx()
 
+        # Retrieve keys from session state (populated from users.db)
+        oa_key = st.session_state.get("openai_api_key", "").strip()
+        q_url = st.session_state.get("qdrant_url", "").strip()
+        q_key = st.session_state.get("qdrant_api_key", "").strip()
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            # Use the wrapper to run build_quiz_from_rag with the captured context
+            # We now pass the user-specific keys directly into the backend function
             future = executor.submit(
                 thread_wrapper,
                 build_quiz_from_rag,
@@ -285,10 +331,13 @@ if st.button("🎲 Generate 10 Questions"):
                 subject=S["selected_subject"],
                 model_name=st.session_state.selected_model,
                 n_questions=10,
-                vector_db="faiss",
+                vector_db=st.session_state.vector_db, # Now dynamic (faiss or qdrant)
                 user_id=user_id,
                 ollama_models=ollama_models,
                 openai_models=openai_models,
+                # --- NEW: Pass user-specific credentials ---
+                qdrant_url=q_url,
+                qdrant_api_key=q_key
             )
 
             while not future.done():
@@ -308,10 +357,13 @@ if st.button("🎲 Generate 10 Questions"):
         if err:
             st.error(f"Quiz generation crashed: {err}")
         elif quiz:
+            # Clear previous answers and set up the new quiz
             S.update({"quiz": quiz, "current_idx": 0, "score": 0, "submitted": {}})
+            st.success("Quiz generated successfully!")
+            time.sleep(1)
             st.rerun()
         else:
-            st.error("Failed to generate questions. Check terminal for LLM errors.")
+            st.error("Failed to generate questions. The AI might have returned invalid data.")
 
 # ---------- QUIZ PLAYER ----------
 @st.fragment

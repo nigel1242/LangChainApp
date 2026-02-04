@@ -12,19 +12,18 @@ def get_client():
     Returns a QdrantClient using credentials stored in the current 
     Streamlit session (retrieved from users.db during login).
     """
-    # These keys are populated in login.py during authentication
-    url = st.session_state.get("qdrant_url")
-    api_key = st.session_state.get("qdrant_api_key")
+    # Keys are populated in login.py during authentication/check_authentication
+    url = st.session_state.get("qdrant_url", "").strip()
+    api_key = st.session_state.get("qdrant_api_key", "").strip()
 
     if not url:
-        # Fallback for local development if session is empty
-        import os
-        url = os.getenv("QDRANT_URL", "http://localhost:6333")
-        api_key = os.getenv("QDRANT_API_KEY", None)
+        # If no URL is found in session, we cannot connect. 
+        # In a multi-user app, we raise an error rather than falling back to a global env.
+        raise ConnectionError("Qdrant URL not found in user session. Please update Settings.")
 
     return QdrantClient(
         url=url,
-        api_key=api_key,
+        api_key=api_key if api_key else None,
         prefer_grpc=False,
         timeout=10
     )
@@ -39,7 +38,8 @@ def get_doc_collection_name(vector_size: int) -> str:
     return f"{DOC_COLLECTION_PREFIX}_{vector_size}"
 
 def ensure_collection_exists(collection_name: str, vector_size: int = None):
-    client = get_client() # Get client dynamically
+    """Ensures collection exists with proper payload indexes."""
+    client = get_client() 
     existing_collections = [c.name for c in client.get_collections().collections]
 
     if collection_name not in existing_collections:
@@ -49,6 +49,7 @@ def ensure_collection_exists(collection_name: str, vector_size: int = None):
             vectors_config=qmodels.VectorParams(size=v_size, distance=qmodels.Distance.COSINE)
         )
         
+    # --- AUTO-INDEXING FOR PERFORMANCE & FILTERING ---
     if collection_name == CHAT_COLLECTION:
         client.create_payload_index(collection_name, "subject", "keyword")
     elif collection_name == MESSAGE_COLLECTION:
@@ -59,6 +60,7 @@ def ensure_collection_exists(collection_name: str, vector_size: int = None):
 
 # ------------------ Subjects ------------------
 def load_all_subjects_qdrant():
+    """Lists all unique subject names stored across RAG collections."""
     client = get_client()
     subjects = set()
     try:
@@ -82,6 +84,7 @@ def load_all_subjects_qdrant():
     return sorted(list(subjects))
 
 def create_subject_meta_qdrant(subject_name: str):
+    """Creates a placeholder point so a new subject appears in the UI."""
     client = get_client()
     meta_col = f"{DOC_COLLECTION_PREFIX}_metadata"
     ensure_collection_exists(meta_col, vector_size=1)
@@ -170,6 +173,7 @@ def add_message_qdrant(chat_id: str, role: str, content: str, used_rag: int = 0)
 
 # ------------------ RAG Docs ------------------
 def add_rag_doc_qdrant(subject_name: str, file_name: str, vector_data: list, content: str, metadata: dict = None):
+    """Upserts a document chunk and its vector to the appropriate collection."""
     client = get_client()
     vector_size = len(vector_data)
     collection_name = get_doc_collection_name(vector_size)
@@ -214,6 +218,7 @@ def file_exists_qdrant(subject_name: str, file_name: str, vector_size: int) -> b
 
 # ------------------ Cleanup ------------------
 def delete_chat_qdrant(chat_id: str):
+    """Deletes a specific chat and all its associated messages."""
     client = get_client()
     delete_filter = qmodels.Filter(
         must=[qmodels.FieldCondition(key="chat_id", match=qmodels.MatchValue(value=chat_id))]
@@ -228,6 +233,7 @@ def delete_chat_qdrant(chat_id: str):
         print(f"Qdrant Message Delete Error: {e}")
 
 def delete_subject_qdrant(subject_name: str):
+    """Removes all data linked to a subject across all collections."""
     client = get_client()
     chat_filter = qmodels.Filter(
         must=[qmodels.FieldCondition(key="subject", match=qmodels.MatchValue(value=subject_name))]
