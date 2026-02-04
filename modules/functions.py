@@ -44,11 +44,10 @@ class OpenAIEmbeddings(Embeddings):
 
 # ----------------- openai -------------------
 
-def get_openai_client() -> OpenAI:
-    api_key = st.session_state.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
-    api_key = api_key.strip()
+def get_openai_client():
+    api_key = st.session_state.get("openai_api_key")
     if not api_key:
-        raise RuntimeError("OpenAI API key missing. Set it in settings.")
+        raise ValueError("OpenAI API Key not found in your user profile. Please update Settings.")
     return OpenAI(api_key=api_key)
 
 # ----------------- TTS & Audio -------------------

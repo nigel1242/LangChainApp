@@ -4,7 +4,6 @@ import os
 import re
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
-from dotenv import load_dotenv
 import time
 import ollama
 from qdrant_client import QdrantClient
@@ -21,7 +20,6 @@ from modules.functions import (
 from modules.login import check_authentication, login_page, logout
 from modules.quizstats.file_utils import convert_to_pdf, extract_text_from_path, render_pdf_page_image, save_uploaded_files, ensure_subject_folders
 
-load_dotenv()
 CHAT_DB_FILE = "chat.db"
 
 # ------------------ CONFIG ------------------
@@ -356,39 +354,38 @@ def main():
     db = st.session_state.db
     USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
     
-    # Initialize backend verification flag
-    if "backend_verified" not in st.session_state:
-        st.session_state.backend_verified = False
+    # --- API KEY RETRIEVAL (Database First) ---
+    # Prioritize the keys pulled from users.db during login
+    oa_key = st.session_state.get("openai_api_key", "").strip()
     
-    # Define OpenAI status
-    oa_key = st.session_state.get("openai_api_key", os.getenv("OPENAI_API_KEY", "")).strip()
     openai_functional = bool(oa_key)
     st.session_state.openai_api_key = oa_key
+
+    # --- QDRANT CONFIGURATION (Database First) ---
+    q_url = st.session_state.get("qdrant_url", "").strip()
+    q_key = st.session_state.get("qdrant_api_key", "").strip()
+
+    st.session_state.qdrant_url = q_url
+    st.session_state.qdrant_api_key = q_key
 
     # Define Qdrant/Backend status with caching
     using_qdrant = st.session_state.get("vector_db") == "qdrant"
     lock_ui = False
     
     if using_qdrant:
-        q_url = os.getenv("QDRANT_URL", "").strip()
-        q_key = os.getenv("QDRANT_API_KEY", "").strip()
-        
         if not q_url or not q_key:
             lock_ui = True
             st.session_state.qdrant_error = "Missing Qdrant credentials"
         elif not st.session_state.backend_verified:
-            # ONLY run this network check if we haven't verified yet
             try:
+                # Use the variables q_url and q_key retrieved above
                 test_client = QdrantClient(url=q_url, api_key=q_key, timeout=2)
                 test_client.get_collections()
-                st.session_state.backend_verified = True  # Cache the success
+                st.session_state.backend_verified = True
                 st.session_state.qdrant_error = None
             except Exception as e:
                 lock_ui = True
                 st.session_state.qdrant_error = f"Connection failed: {str(e)}"
-        else:
-            # Already verified in this session - skip the check
-            lock_ui = False
 
     # 4. DATA RETRIEVAL & SAFETY FALLBACKS
     subjects = db.load_all_subjects()
@@ -404,7 +401,6 @@ def main():
         "current_chat_id": None,
         "selected_model": None,
         "vision_images": [],
-        "uploaded_files_to_process": [],
         "rag_enabled": True,
         "last_assistant_text": "",
         "temp_prompt": None,
@@ -415,8 +411,8 @@ def main():
         "vector_db": "faiss",
         "chat_backend": "sqlite",
         "vision_uploader_key": 0,
-        "qdrant_url": os.getenv("QDRANT_URL", ""),
-        "qdrant_api_key": os.getenv("QDRANT_API_KEY", "")
+        "qdrant_url": q_url, # Use the local variable
+        "qdrant_api_key": q_key # Use the local variable
     }
     for key, val in defaults.items():
         if key not in st.session_state:

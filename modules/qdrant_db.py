@@ -2,36 +2,32 @@
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 from datetime import datetime
-from pathlib import Path
-from dotenv import load_dotenv
 import uuid
-import os
+import streamlit as st
 
 # ------------------ Init Qdrant client ------------------
-BASE_DIR = Path(__file__).resolve().parent.parent
-ENV_PATH = BASE_DIR / ".env"
-load_dotenv(dotenv_path=ENV_PATH)
 
-def get_qdrant_client():
+def get_client():
     """
-    Dynamically initializes the Qdrant client.
-    Prioritizes Cloud environment variables, fallbacks to localhost for local dev.
+    Returns a QdrantClient using credentials stored in the current 
+    Streamlit session (retrieved from users.db during login).
     """
-    # Use environment variables if they exist (Deployment), otherwise use localhost
-    url = os.getenv("QDRANT_URL", "http://localhost:6333")
-    api_key = os.getenv("QDRANT_API_KEY", None)
-    
-    # ✅ prefer_grpc=False is critical for stable HTTPS connections on Qdrant Cloud
-    # Increased timeout to 10s to account for cloud latency
+    # These keys are populated in login.py during authentication
+    url = st.session_state.get("qdrant_url")
+    api_key = st.session_state.get("qdrant_api_key")
+
+    if not url:
+        # Fallback for local development if session is empty
+        import os
+        url = os.getenv("QDRANT_URL", "http://localhost:6333")
+        api_key = os.getenv("QDRANT_API_KEY", None)
+
     return QdrantClient(
         url=url,
         api_key=api_key,
         prefer_grpc=False,
         timeout=10
     )
-
-# Global client instance
-client = get_qdrant_client()
 
 # ------------------ Constants ------------------
 CHAT_COLLECTION = "chats_meta"
@@ -43,33 +39,27 @@ def get_doc_collection_name(vector_size: int) -> str:
     return f"{DOC_COLLECTION_PREFIX}_{vector_size}"
 
 def ensure_collection_exists(collection_name: str, vector_size: int = None):
-    """
-    Ensures the collection exists and has all necessary payload indexes 
-    to support filtered deletions and searches.
-    """
+    client = get_client() # Get client dynamically
     existing_collections = [c.name for c in client.get_collections().collections]
 
     if collection_name not in existing_collections:
-        # If vector_size is 1, it's a metadata collection
         v_size = vector_size if vector_size else 1
         client.create_collection(
             collection_name=collection_name,
             vectors_config=qmodels.VectorParams(size=v_size, distance=qmodels.Distance.COSINE)
         )
         
-    # --- AUTO-INDEXING FOR CLOUD COMPATIBILITY ---
     if collection_name == CHAT_COLLECTION:
         client.create_payload_index(collection_name, "subject", "keyword")
-        
     elif collection_name == MESSAGE_COLLECTION:
         client.create_payload_index(collection_name, "chat_id", "keyword")
-        
     elif collection_name.startswith(DOC_COLLECTION_PREFIX):
         client.create_payload_index(collection_name, "subject_name", "keyword")
         client.create_payload_index(collection_name, "chat_id", "keyword")
 
 # ------------------ Subjects ------------------
 def load_all_subjects_qdrant():
+    client = get_client()
     subjects = set()
     try:
         collections = client.get_collections().collections
@@ -92,6 +82,7 @@ def load_all_subjects_qdrant():
     return sorted(list(subjects))
 
 def create_subject_meta_qdrant(subject_name: str):
+    client = get_client()
     meta_col = f"{DOC_COLLECTION_PREFIX}_metadata"
     ensure_collection_exists(meta_col, vector_size=1)
     try:
@@ -114,6 +105,7 @@ def create_subject_meta_qdrant(subject_name: str):
 
 # ------------------ Chats & Messages ------------------
 def create_new_chat_qdrant(model_name: str, subject_name: str):
+    client = get_client()
     ensure_collection_exists(CHAT_COLLECTION, vector_size=1)
     chat_id = str(uuid.uuid4())
     client.upsert(
@@ -132,6 +124,7 @@ def create_new_chat_qdrant(model_name: str, subject_name: str):
     return chat_id
 
 def load_all_chats_qdrant(subject_name: str):
+    client = get_client()
     ensure_collection_exists(CHAT_COLLECTION, vector_size=1)
     chat_filter = qmodels.Filter(must=[qmodels.FieldCondition(key="subject", match=qmodels.MatchValue(value=subject_name))])
     try:
@@ -145,6 +138,7 @@ def load_all_chats_qdrant(subject_name: str):
     except Exception: return []
 
 def load_chat_qdrant(chat_id):
+    client = get_client()
     chat_info = client.retrieve(collection_name=CHAT_COLLECTION, ids=[chat_id])
     model_name = chat_info[0].payload.get("model_name", "Unknown") if chat_info else "Unknown"
     
@@ -160,6 +154,7 @@ def load_chat_qdrant(chat_id):
     return all_messages, model_name
 
 def add_message_qdrant(chat_id: str, role: str, content: str, used_rag: int = 0):
+    client = get_client()
     ensure_collection_exists(MESSAGE_COLLECTION, vector_size=1)
     client.upsert(
         collection_name=MESSAGE_COLLECTION,
@@ -175,6 +170,7 @@ def add_message_qdrant(chat_id: str, role: str, content: str, used_rag: int = 0)
 
 # ------------------ RAG Docs ------------------
 def add_rag_doc_qdrant(subject_name: str, file_name: str, vector_data: list, content: str, metadata: dict = None):
+    client = get_client()
     vector_size = len(vector_data)
     collection_name = get_doc_collection_name(vector_size)
     ensure_collection_exists(collection_name, vector_size=vector_size)
@@ -197,6 +193,7 @@ def add_rag_doc_qdrant(subject_name: str, file_name: str, vector_data: list, con
         return False, str(e)
 
 def file_exists_qdrant(subject_name: str, file_name: str, vector_size: int) -> bool:
+    client = get_client()
     collection_name = get_doc_collection_name(vector_size)
     existing = [c.name for c in client.get_collections().collections]
     if collection_name not in existing:
@@ -217,6 +214,7 @@ def file_exists_qdrant(subject_name: str, file_name: str, vector_size: int) -> b
 
 # ------------------ Cleanup ------------------
 def delete_chat_qdrant(chat_id: str):
+    client = get_client()
     delete_filter = qmodels.Filter(
         must=[qmodels.FieldCondition(key="chat_id", match=qmodels.MatchValue(value=chat_id))]
     )
@@ -230,6 +228,7 @@ def delete_chat_qdrant(chat_id: str):
         print(f"Qdrant Message Delete Error: {e}")
 
 def delete_subject_qdrant(subject_name: str):
+    client = get_client()
     chat_filter = qmodels.Filter(
         must=[qmodels.FieldCondition(key="subject", match=qmodels.MatchValue(value=subject_name))]
     )

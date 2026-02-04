@@ -21,7 +21,10 @@ def init_db():
         username TEXT UNIQUE NOT NULL,
         email TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
-        salt TEXT NOT NULL
+        salt TEXT NOT NULL,
+        openai_api_key TEXT,
+        qdrant_url TEXT,
+        qdrant_api_key TEXT
     )
     """)
 
@@ -198,21 +201,57 @@ def clear_token_file():
 
 
 def check_authentication():
-    # Check session state first
     if st.session_state.get("authenticated", False):
         return True, st.session_state.get("username")
     
-    # Check file-based session
     user_id = get_session()
     if user_id:
         username = get_username(user_id)
+        creds = get_user_credentials(user_id)
+        
         if username:
             st.session_state["authenticated"] = True
             st.session_state["user_id"] = user_id
             st.session_state["username"] = username
+            
+            # Inject keys into session state for Chat and Settings pages
+            st.session_state["openai_api_key"] = creds["openai_api_key"]
+            st.session_state["qdrant_url"] = creds["qdrant_url"]
+            st.session_state["qdrant_api_key"] = creds["qdrant_api_key"]
+            
             return True, username
     
     return False, None
+
+def update_user_credentials(user_id, openai_key, q_url, q_key):
+    """Saves API credentials specifically for the given user_id."""
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE users 
+        SET openai_api_key = ?, qdrant_url = ?, qdrant_api_key = ?
+        WHERE id = ?
+    """, (openai_key, q_url, q_key, user_id))
+    conn.commit()
+    conn.close()
+
+def get_user_credentials(user_id):
+    """Retrieves API credentials for the given user_id."""
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT openai_api_key, qdrant_url, qdrant_api_key 
+        FROM users WHERE id = ?
+    """, (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return {
+            "openai_api_key": row[0] or "",
+            "qdrant_url": row[1] or "",
+            "qdrant_api_key": row[2] or ""
+        }
+    return {"openai_api_key": "", "qdrant_url": "", "qdrant_api_key": ""}
 
 # UI
 def login_page():
