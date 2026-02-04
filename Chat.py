@@ -28,6 +28,53 @@ CHAT_DB_FILE = "chat.db"
 st.set_page_config(page_title="My Learning AI", page_icon="📚", layout="wide")
 
 def main():
+    def process_assistant_completion(chat_id, full_res, used_rag, sources=None):
+        """Saves completion and CLEAR STATE for next turn."""
+        st.session_state.last_assistant_text = full_res
+        
+        # Save to database
+        db.add_message(chat_id, "assistant", full_res, used_rag=int(used_rag))
+        
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": full_res,
+            "used_rag": int(used_rag),
+            "sources": sources
+        })
+
+        # --- CLEAR VISION STATE HERE ---
+        st.session_state.vision_images = []  
+        st.session_state.vision_uploader_key += 1  # This forces the uploader widget to reset
+        st.session_state.temp_prompt = None 
+        
+        # CRITICAL: First message needs full reload to update sidebar & lock model
+        # Subsequent messages only need fragment reload for speed
+        is_first_message = len(st.session_state.messages) <= 2  # user + assistant
+        
+        if is_first_message:
+            st.rerun()  # Full reload to show chat in sidebar and lock model
+        else:
+            st.rerun(scope="fragment")  # Fast fragment reload for subsequent messages
+
+    def clear_tts():
+        st.session_state.tts_audio_bytes = None
+        st.session_state.tts_audio_for = ""
+     
+    def format_latex(text: str) -> str:
+        """Converts common LLM LaTeX delimiters to Streamlit-friendly ones."""
+        # Convert \[ ... \] to $$ ... $$ for block math
+        text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+        # Convert \( ... \) to $ ... $ for inline math
+        text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+        # Sometimes models use [ ] or ( ) without backslashes
+        # Only use these if you notice the model consistently failing backslashes
+        return text
+    
+    def ensure_general_exists(db, user_id):
+        existing_subs = db.load_all_subjects()
+        if "General" not in existing_subs:
+            db.add_subject("General")
+            ensure_subject_folders("General", user_id)
     @st.fragment
     def chat_interface():
         """Isolated chat interface that reloads independently from sidebar"""
@@ -68,7 +115,7 @@ def main():
                                 client = get_openai_client()
                                 st.session_state.tts_audio_bytes = speak_text(latest_a, client, st.session_state.tts_voice)
                                 st.session_state.tts_audio_for = latest_a
-                                st.rerun()
+                                st.rerun(scope="fragment")
             if has_audio:
                     st.audio(st.session_state.tts_audio_bytes, format="audio/mp3")
 
@@ -92,14 +139,14 @@ def main():
                     voice_text = transcribe_audio_bytes(audio_data, client)
                     if voice_text:
                         st.session_state.temp_prompt = voice_text
-                        clear_tts(); st.rerun()
+                        clear_tts(); st.rerun(scope="fragment")
                 except Exception as e: st.error(f"Mic Error: {e}")
 
         with col_text:
             typed_prompt = st.chat_input(f"Ask about {current_subject}...", disabled=lock_ui)
             if typed_prompt:
                 st.session_state.temp_prompt = typed_prompt
-                clear_tts(); st.rerun()
+                clear_tts(); st.rerun(scope="fragment")
 
         if is_vision_model:
             uploaded_img = st.file_uploader(
@@ -197,7 +244,12 @@ def main():
             # --- CONSTRUCT PROMPT ---
             if has_docs and rag_content.strip():
                 indicator = "📄 "
-                enhanced_p = f"You are a helpful assistant. Context:\n{rag_content}\n\nQuestion: {user_p}"
+                enhanced_p = (
+                    f"Context:\n{rag_content}\n\n"
+                    f"Question: {user_p}\n\n"
+                    "Important: Always use LaTeX for mathematical formulas. "
+                    "Use $$ for block equations and $ for inline equations."
+                )
             else:
                 indicator = ""
                 enhanced_p = user_p
@@ -271,47 +323,6 @@ def main():
 
                     # Save completion
                     process_assistant_completion(chat_id, format_latex(full_res), has_docs, sources=sources_to_display)
-    
-    def process_assistant_completion(chat_id, full_res, used_rag, sources=None):
-        """Saves completion and CLEAR STATE for next turn."""
-        st.session_state.last_assistant_text = full_res
-        
-        # Save to database
-        db.add_message(chat_id, "assistant", full_res, used_rag=int(used_rag))
-        
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": full_res,
-            "used_rag": int(used_rag),
-            "sources": sources
-        })
-
-        # --- CLEAR VISION STATE HERE ---
-        st.session_state.vision_images = []  
-        st.session_state.vision_uploader_key += 1  # This forces the uploader widget to reset
-        st.session_state.temp_prompt = None 
-        
-        st.rerun()
-
-    def clear_tts():
-        st.session_state.tts_audio_bytes = None
-        st.session_state.tts_audio_for = ""
-     
-    def format_latex(text: str) -> str:
-        """Converts common LLM LaTeX delimiters to Streamlit-friendly ones."""
-        # Convert \[ ... \] to $$ ... $$ for block math
-        text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
-        # Convert \( ... \) to $ ... $ for inline math
-        text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
-        # Sometimes models use [ ] or ( ) without backslashes
-        # Only use these if you notice the model consistently failing backslashes
-        return text
-    
-    def ensure_general_exists(db, user_id):
-        existing_subs = db.load_all_subjects()
-        if "General" not in existing_subs:
-            db.add_subject("General")
-            ensure_subject_folders("General", user_id)
 
     # 1. AUTHENTICATION
     is_authenticated, username = check_authentication()
@@ -345,27 +356,39 @@ def main():
     db = st.session_state.db
     USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
     
+    # Initialize backend verification flag
+    if "backend_verified" not in st.session_state:
+        st.session_state.backend_verified = False
+    
     # Define OpenAI status
     oa_key = st.session_state.get("openai_api_key", os.getenv("OPENAI_API_KEY", "")).strip()
-    openai_functional = bool(oa_key) # Defined here!
+    openai_functional = bool(oa_key)
     st.session_state.openai_api_key = oa_key
 
-    # Define Qdrant/Backend status
+    # Define Qdrant/Backend status with caching
     using_qdrant = st.session_state.get("vector_db") == "qdrant"
     lock_ui = False
     
     if using_qdrant:
         q_url = os.getenv("QDRANT_URL", "").strip()
         q_key = os.getenv("QDRANT_API_KEY", "").strip()
+        
         if not q_url or not q_key:
             lock_ui = True
-        else:
+            st.session_state.qdrant_error = "Missing Qdrant credentials"
+        elif not st.session_state.backend_verified:
+            # ONLY run this network check if we haven't verified yet
             try:
-                from qdrant_client import QdrantClient
                 test_client = QdrantClient(url=q_url, api_key=q_key, timeout=2)
                 test_client.get_collections()
-            except:
+                st.session_state.backend_verified = True  # Cache the success
+                st.session_state.qdrant_error = None
+            except Exception as e:
                 lock_ui = True
+                st.session_state.qdrant_error = f"Connection failed: {str(e)}"
+        else:
+            # Already verified in this session - skip the check
+            lock_ui = False
 
     # 4. DATA RETRIEVAL & SAFETY FALLBACKS
     subjects = db.load_all_subjects()
@@ -403,10 +426,9 @@ def main():
     st.title("📖 My Learning AI")
 
     if lock_ui:
-        st.error("⚠️ Qdrant Backend Locked: Check credentials in Settings.")
+        st.error(f"⚠️ Qdrant Backend Locked: {st.session_state.get('qdrant_error', 'Check credentials in Settings.')}")
         
     if not openai_functional:
-        # We only toast if it hasn't been shown in this specific rerun cycle
         st.toast("**Warning:** OpenAI features are limited.", icon="⚠️")
 
     # ---------------- SIDEBAR ----------------
@@ -453,7 +475,7 @@ def main():
 
         if selected_sub != "General":
             # 1. The initial "Delete" button
-            if st.button(f"🗑️ Delete {selected_sub}", type="primary", width='stretch'):
+            if st.button(f"🗑️ Delete {selected_sub}", type="primary", use_container_width=True):
                 st.session_state.confirm_delete = True
 
             # 2. The Confirmation UI
@@ -463,21 +485,22 @@ def main():
                 col_yes, col_no = st.columns(2)
                 
                 with col_yes:
-                    if st.button("✅ Yes, Delete", type="primary", width='stretch'):
+                    if st.button("✅ Yes, Delete", type="primary", use_container_width=True):
                         db.delete_subject(selected_sub, subject_dir=USER_DATA_ROOT)
                         st.session_state.current_subject = "General"
                         st.session_state.current_chat_id = None
                         st.session_state.messages = []
-                        st.session_state.confirm_delete = False # Reset state
+                        st.session_state.confirm_delete = False
                         st.success(f"Subject '{selected_sub}' deleted.")
                         st.rerun()
                 
                 with col_no:
-                    if st.button("❌ Cancel", width='stretch'):
-                        st.session_state.confirm_delete = False # Reset state
+                    if st.button("❌ Cancel", use_container_width=True):
+                        st.session_state.confirm_delete = False
                         st.rerun()
 
         st.markdown("---")
+        
         backend_choice = st.selectbox(
             "Select Backend",
             ["Local (FAISS)", "Remote (Qdrant)"],
@@ -490,6 +513,7 @@ def main():
         if st.session_state.vector_db != target_v:
             st.session_state.vector_db = target_v
             st.session_state.chat_backend = target_c
+            st.session_state.backend_verified = False  # Reset verification flag
             new_db = DBManager(
                 backend=target_c, 
                 user_id=user_id, 
@@ -500,6 +524,14 @@ def main():
             st.session_state.messages = []
             st.session_state.current_chat_id = None
             st.rerun()
+        
+        # Show connection status
+        if using_qdrant:
+            if st.session_state.backend_verified:
+                st.success("✅ Qdrant Connected")
+            elif lock_ui:
+                st.error(f"❌ {st.session_state.get('qdrant_error', 'Connection Error')}")
+        
         st.markdown("---")
 
         all_chats = []
@@ -509,14 +541,14 @@ def main():
             except Exception:
                 st.warning("⚠️ Could not load remote chats. Check your Qdrant URL.")
 
-        if st.button("🆕 Start New Chat", disabled=lock_ui):
+        if st.button("🆕 Start New Chat", disabled=lock_ui, use_container_width=True):
             st.session_state.update({"messages": [], "current_chat_id": None})
             clear_tts(); st.rerun()
 
         for chat_id, model_name, created_at, title in all_chats:
             col1, col2 = st.columns([4, 1])
             with col1:
-                if st.button(f"💬 {title}", key=f"chat_{chat_id}", width='stretch'):
+                if st.button(f"💬 {title}", key=f"chat_{chat_id}", use_container_width=True):
                         msgs, model = db.load_chat(chat_id)
                         st.session_state.update({"messages": msgs, "current_chat_id": chat_id, "selected_model": model})
                         clear_tts(); st.rerun()
@@ -530,7 +562,7 @@ def main():
                             clear_tts()
                         st.rerun()
 
-    # ---------------- MODELS ----------------
+    # ---------------- MODELS (CACHED) ----------------
     MODEL_MAP = {
         "llama3:8b": "Llama 3 (Base Model)",
         "llava:7b": "Llava (Vision Model)",
@@ -538,12 +570,15 @@ def main():
     }
     ALLOWED_MODEL_IDS = list(MODEL_MAP.keys())
 
-    try:
-        raw_ollama = [m["model"] for m in ollama.list().get("models", [])]
-        ollama_models = tuple(m for m in raw_ollama if m in ALLOWED_MODEL_IDS)
-    except:
-        ollama_models = ()
+    # Cache Ollama model discovery
+    if "available_ollama_models" not in st.session_state:
+        try:
+            raw_ollama = [m["model"] for m in ollama.list().get("models", [])]
+            st.session_state.available_ollama_models = tuple(m for m in raw_ollama if m in ALLOWED_MODEL_IDS)
+        except:
+            st.session_state.available_ollama_models = ()
 
+    ollama_models = st.session_state.available_ollama_models
     openai_models = ("gpt-4o",) if openai_functional else ()
     available_technical = ollama_models + openai_models
     display_models = [MODEL_MAP.get(m, m) for m in available_technical]

@@ -135,16 +135,25 @@ def add_message_sqlite(db_file: str, chat_id, role, content, used_rag=0):
     conn.commit()
     conn.close()
 
-def load_chat_sqlite(db_file: str, chat_id):
+import sqlite3
+
+def load_chat_sqlite(db_file: str, chat_id, user_id):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
+    cursor.execute("SELECT model_name FROM chats WHERE id = ? AND user_id = ?", (chat_id, user_id))
+    res = cursor.fetchone()
+    if not res:
+        conn.close()
+        return [], "Unknown"
+    model_name = res[0]
     cursor.execute("SELECT role, content, used_rag FROM messages WHERE chat_id = ? ORDER BY id ASC", (chat_id,))
     rows = cursor.fetchall()
-    cursor.execute("SELECT model_name FROM chats WHERE id = ?", (chat_id,))
-    res = cursor.fetchone()
-    model_name = res[0] if res else "Unknown"
     conn.close()
-    return [{"role": r, "content": c, "used_rag": ur} for r, c, ur in rows], model_name
+    messages = [
+        {"role": r, "content": c, "used_rag": bool(ur)} 
+        for r, c, ur in rows
+    ]
+    return messages, model_name
 
 # --- RAG / KNOWLEDGE BASE FUNCTIONS ---
 
