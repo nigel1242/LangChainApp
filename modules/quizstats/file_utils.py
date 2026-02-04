@@ -2,8 +2,6 @@ import os
 import json
 import streamlit as st
 import fitz  # PyMuPDF
-import win32com.client
-import pythoncom
 from typing import List, Dict, Any
 
 # BASE_DIR remains the same, but SUBJECTS_DIR is now just a base path
