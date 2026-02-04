@@ -794,6 +794,8 @@ def build_quiz_from_rag(
     user_id: int = None,
     ollama_models: tuple = (),
     openai_models: tuple = (),
+    qdrant_url=None,
+    qdrant_api_key=None
 ) -> List[Dict[str, Any]]:
 
     subject_dir = os.path.join("modules", "subjects", f"user_{user_id}", subject)
@@ -891,6 +893,8 @@ def build_quiz_from_rag(
             vector_db=vector_db,
             suffix=suffix,
             user_id=user_id,
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key
         )
         res = docs if (ok and docs) else []
         _rag_cache[key] = res
