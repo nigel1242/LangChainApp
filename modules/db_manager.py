@@ -129,7 +129,7 @@ class DBManager:
         if self.backend == "sqlite":
             return add_rag_doc_sqlite(self.db_file, self.user_id, target_id, file_name, content, metadata)
         if self.backend == "qdrant":
-            return add_rag_doc_qdrant(target_id, file_name, vector_data, content)
+            return add_rag_doc_qdrant(subject_name=target_id, file_name=file_name, vector_data=vector_data, content=content, metadata=metadata)
 
     def get_subject_documents(self, subject_name: str):
         return get_subject_documents_sqlite(self.db_file, self.user_id, subject_name)

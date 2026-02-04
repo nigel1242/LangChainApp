@@ -62,6 +62,12 @@ def main():
         # Sometimes models use [ ] or ( ) without backslashes
         # Only use these if you notice the model consistently failing backslashes
         return text
+    
+    def ensure_general_exists(db, user_id):
+        existing_subs = db.load_all_subjects()
+        if "General" not in existing_subs:
+            db.add_subject("General")
+            ensure_subject_folders("General", user_id)
 
     # 1. AUTHENTICATION
     is_authenticated, username = check_authentication()
@@ -83,10 +89,7 @@ def main():
         temp_db = DBManager(backend="sqlite", user_id=user_id, db_file=CHAT_DB_FILE)
         
         # Ensure 'General' exists
-        existing_subs = temp_db.load_all_subjects()
-        if "General" not in existing_subs:
-            temp_db.add_subject("General")
-            ensure_subject_folders("General", user_id)
+        ensure_general_exists(temp_db, user_id)
         
         # Lock state and force rerun
         st.session_state.db = temp_db
@@ -145,6 +148,8 @@ def main():
         "vector_db": "faiss",
         "chat_backend": "sqlite",
         "vision_uploader_key": 0,
+        "qdrant_url": os.getenv("QDRANT_URL", ""),
+        "qdrant_api_key": os.getenv("QDRANT_API_KEY", "")
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -194,7 +199,9 @@ def main():
             new_sub = st.text_input("Subject Name", disabled=lock_ui)
             if st.button("Create Subject") and new_sub.strip():
                 db.add_subject(new_sub.strip())
-                ensure_subject_folders(new_sub.strip(), user_id)
+                # Only create local folders when using FAISS backend
+                if st.session_state.vector_db == "faiss":
+                    ensure_subject_folders(new_sub.strip(), user_id)
                 st.session_state.current_subject = new_sub.strip()
                 st.session_state.current_chat_id = None
                 st.session_state.messages = []
@@ -239,6 +246,13 @@ def main():
         if st.session_state.vector_db != target_v:
             st.session_state.vector_db = target_v
             st.session_state.chat_backend = target_c
+            new_db = DBManager(
+                backend=target_c, 
+                user_id=user_id, 
+                db_file=CHAT_DB_FILE
+            )
+            st.session_state.db = new_db
+            ensure_general_exists(new_db, user_id)
             st.session_state.messages = []
             st.session_state.current_chat_id = None
             st.rerun()
@@ -311,23 +325,21 @@ def main():
         if st.session_state.current_subject == "General":
             st.info("💡 **Note:** You cannot upload documents to the 'General' subject. Create a new subject in the sidebar first.")
         else:
+            if st.session_state.vector_db == "qdrant":
+                st.info("📡 **Qdrant Mode:** Vectors stored remotely. PDF source rendering not available.")
+            
             uploaded_files = st.file_uploader("Add files", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
             
             if st.button("📂 Process RAG", disabled=lock_ui):
                 target_sub = st.session_state.current_subject
                 
                 if uploaded_files:
-                    raw_dir = os.path.join(USER_DATA_ROOT, target_sub, "raw")
-                    os.makedirs(raw_dir, exist_ok=True)
-                    existing_filenames = os.listdir(raw_dir)
-                    
                     # Availability Flags
                     use_openai = bool(st.session_state.openai_api_key)
                     use_ollama = True 
 
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    msg_placeholder = st.empty() # For duplicate alerts
                     
                     qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
@@ -336,58 +348,91 @@ def main():
                         percent_val = (i + 1) / len(uploaded_files)
                         progress_bar.progress(percent_val)
                         
-                        # --- DUPLICATE CHECK ---
-                        if f.name in existing_filenames:
-                            continue 
-
-                        # --- NEW FILE PROCESSING ---
                         status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
                         
+                        # --- EXTRACT TEXT DIRECTLY FROM UPLOAD ---
                         f.seek(0)
-                        save_uploaded_files(target_sub, [f], user_id=user_id)
-                        original_path = os.path.join(raw_dir, f.name)
+                        file_bytes = f.read()
                         
-                        # Convert PPTX/DOCX to PDF
-                        ext = f.name.split('.')[-1].lower()
-                        final_path = original_path
-                        if ext in ["pptx", "docx"]:
-                            pdf_path = convert_to_pdf(original_path)
-                            if pdf_path and pdf_path != original_path:
-                                final_path = pdf_path
-                                try: os.remove(original_path)
-                                except: pass
-                        
-                        content = extract_text_from_path(final_path)
-                        final_filename = os.path.basename(final_path)
-
-                        # --- PATH A: FAISS ---
+                        # For FAISS: Save files locally
                         if st.session_state.vector_db == "faiss":
+                            raw_dir = os.path.join(USER_DATA_ROOT, target_sub, "raw")
+                            os.makedirs(raw_dir, exist_ok=True)
+                            existing_filenames = os.listdir(raw_dir)
+                            
+                            # Skip duplicates
+                            if f.name in existing_filenames:
+                                continue
+                            
+                            f.seek(0)
+                            save_uploaded_files(target_sub, [f], user_id=user_id)
+                            original_path = os.path.join(raw_dir, f.name)
+                            
+                            # Convert PPTX/DOCX to PDF
+                            ext = f.name.split('.')[-1].lower()
+                            final_path = original_path
+                            if ext in ["pptx", "docx"]:
+                                pdf_path = convert_to_pdf(original_path)
+                                if pdf_path and pdf_path != original_path:
+                                    final_path = pdf_path
+                                    try: os.remove(original_path)
+                                    except: pass
+                            
+                            content = extract_text_from_path(final_path)
+                            final_filename = os.path.basename(final_path)
+                            
+                            # Add to FAISS
                             if use_ollama:
                                 db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
                                             content=content, metadata={"engine": "ollama"})
                             if use_openai:
                                 db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
                                             content=content, metadata={"engine": "openai"})
-
-                        # --- PATH B: QDRANT ---
+                        
+                        # For Qdrant: Process in-memory only
                         elif st.session_state.vector_db == "qdrant":
-                            chunks = qdrant_splitter.split_text(content)
-                            for chunk_text in chunks:
-                                if use_ollama:
-                                    ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-                                    v_ollama = ollama_embedder.embed_query(chunk_text)
-                                    db.add_rag_doc(target_id=target_sub, file_name=final_filename,
-                                                content=chunk_text, vector_data=v_ollama,
-                                                metadata={"engine": "ollama"})
-                                if use_openai:
-                                    openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
-                                                                    api_key=st.session_state.openai_api_key)
-                                    v_openai = openai_embedder.embed_query(chunk_text)
-                                    db.add_rag_doc(target_id=target_sub, file_name=final_filename,
-                                                content=chunk_text, vector_data=v_openai,
-                                                metadata={"engine": "openai"})
+                            # Extract text from bytes (without saving to disk)
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{f.name.split('.')[-1]}") as tmp_file:
+                                tmp_file.write(file_bytes)
+                                tmp_path = tmp_file.name
+                            
+                            try:
+                                # Convert if needed
+                                ext = f.name.split('.')[-1].lower()
+                                final_tmp_path = tmp_path
+                                if ext in ["pptx", "docx"]:
+                                    pdf_path = convert_to_pdf(tmp_path)
+                                    if pdf_path and pdf_path != tmp_path:
+                                        final_tmp_path = pdf_path
+                                        try: os.remove(tmp_path)
+                                        except: pass
+                                
+                                # Extract text
+                                content = extract_text_from_path(final_tmp_path)
+                                
+                                # Chunk and upload to Qdrant
+                                chunks = qdrant_splitter.split_text(content)
+                                for chunk_text in chunks:
+                                    if use_ollama:
+                                        ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+                                        v_ollama = ollama_embedder.embed_query(chunk_text)
+                                        db.add_rag_doc(target_id=target_sub, file_name=f.name,
+                                                    content=chunk_text, vector_data=v_ollama,
+                                                    metadata={"engine": "ollama"})
+                                    if use_openai:
+                                        openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
+                                                                        api_key=st.session_state.openai_api_key)
+                                        v_openai = openai_embedder.embed_query(chunk_text)
+                                        db.add_rag_doc(target_id=target_sub, file_name=f.name,
+                                                    content=chunk_text, vector_data=v_openai,
+                                                    metadata={"engine": "openai"})
+                            finally:
+                                # Clean up temp file
+                                try: os.remove(final_tmp_path)
+                                except: pass
 
-                    # --- FINAL FAISS SYNC ---
+                    # --- FINAL FAISS SYNC (only for FAISS) ---
                     if st.session_state.vector_db == "faiss":
                         subject_path = os.path.join(USER_DATA_ROOT, target_sub)
                         if use_ollama:
@@ -398,6 +443,7 @@ def main():
                             status_text.text("🔄 Rebuilding OpenAI FAISS index...")
                             rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
                                             ollama_models, openai_models, suffix="openai", user_id=user_id)
+                    
                     st.success(f"✅ Knowledge Base Processed!")
                     time.sleep(2)
                     st.rerun()
@@ -408,8 +454,8 @@ def main():
         with message_container.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else "😎"):
             st.markdown(("📄 " if msg.get("used_rag") else "") + msg["content"])
             
-            # New: Display Source Images
-            if msg.get("sources"):
+            # New: Display Source Images (only for FAISS)
+            if msg.get("sources") and st.session_state.vector_db == "faiss":
                 with st.expander("🔍 View Source Material"):
                     cols = st.columns(len(msg["sources"]))
                     for i, source in enumerate(msg["sources"]):
@@ -516,13 +562,16 @@ def main():
             if st.session_state.vector_db == "qdrant":
                 try:
                     with st.spinner("🔍 Searching Knowledge Base (Qdrant)..."):
-                        rag_content, raw_docs, search_success = get_relevant_rag(
+                        rag_content, raw_docs, has_docs = get_relevant_rag(
                             CHAT_DB_FILE, None, search_id, user_p,
                             st.session_state.selected_model, ollama_models, openai_models,
                             vector_db="qdrant",
                             qdrant_url=st.session_state.qdrant_url,
                             qdrant_api_key=st.session_state.qdrant_api_key
                         )
+                        # Ensure has_docs is set based on whether we got results
+                        if raw_docs:
+                            has_docs = True
                 except Exception as e: 
                     st.error(f"Qdrant RAG Error: {e}")
             elif st.session_state.vector_db == "faiss":
@@ -534,7 +583,8 @@ def main():
                         vector_db="faiss"
                     )
 
-            if raw_docs:
+            # Only process sources for FAISS (since Qdrant won't render PDFs)
+            if raw_docs and st.session_state.vector_db == "faiss":
                 has_docs = True
                 seen = set()
                 for doc in raw_docs:
