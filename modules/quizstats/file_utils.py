@@ -2,12 +2,20 @@ import os
 import json
 import streamlit as st
 import fitz  # PyMuPDF
-import win32com.client
-import pythoncom
+import platform
 from typing import List, Dict, Any
 
-# BASE_DIR remains the same, but SUBJECTS_DIR is now just a base path
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__))) 
+# ------------------ Platform check ------------------
+
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
+    import win32com.client
+    import pythoncom
+
+# ------------------ Paths ------------------
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 SUBJECTS_BASE = os.path.join(BASE_DIR, "modules", "subjects")
 
 # ------------ subject folder helpers ------------
@@ -52,41 +60,58 @@ def save_uploaded_files(subject_name: str, files, user_id: int) -> List[str]:
 
 # ------------ extraction helpers ------------
 
-def convert_to_pdf(input_path: str) -> str:
-    """Standalone conversion (path-based, already user-isolated by caller)."""
+def convert_to_pdf(input_path: str) -> str | None:
+    """
+    Converts DOCX / PPTX to PDF on Windows.
+    On non-Windows systems, returns None with a user-friendly message.
+    """
     abs_input = os.path.abspath(input_path)
     pdf_output = os.path.splitext(abs_input)[0] + ".pdf"
     ext = os.path.splitext(abs_input)[1].lower()
-    
-    if os.path.exists(pdf_output): 
+
+    if os.path.exists(pdf_output):
         return pdf_output
 
-    pythoncom.CoInitialize() 
+    if not IS_WINDOWS:
+        st.warning(
+            "DOCX/PPTX conversion is not supported on cloud deployments. "
+            "Please upload PDFs instead."
+        )
+        return None
+
+    pythoncom.CoInitialize()
     try:
         if ext == ".pptx":
             app = win32com.client.DispatchEx("PowerPoint.Application")
             obj = app.Presentations.Open(abs_input, True, False, False)
-            obj.SaveAs(pdf_output, 32) 
+            obj.SaveAs(pdf_output, 32)
+
         elif ext == ".docx":
             app = win32com.client.DispatchEx("Word.Application")
             obj = app.Documents.Open(abs_input, ReadOnly=True, Visible=False)
-            obj.SaveAs(pdf_output, 17) 
-        
+            obj.SaveAs(pdf_output, 17)
+
+        else:
+            return None
+
         obj.Close()
         app.Quit()
         return pdf_output
+
     except Exception as e:
         st.error(f"Conversion failed: {e}")
         return None
+
     finally:
         pythoncom.CoUninitialize()
 
 def extract_text_from_path(file_path: str) -> str:
     """Extracts text from a specific PDF path."""
     text = ""
+
     if not os.path.exists(file_path):
         return ""
-        
+
     try:
         doc = fitz.open(file_path)
         for i, page in enumerate(doc, start=1):
@@ -96,7 +121,7 @@ def extract_text_from_path(file_path: str) -> str:
         doc.close()
     except Exception as e:
         print(f"Error extracting text: {e}")
-        
+
     return text
 
 # ------------ context search helpers ------------
@@ -105,9 +130,10 @@ def get_subject_index_entries(subject_name: str, user_id: int) -> List[Dict[str,
     """Return index entries for a specific user's subject."""
     subject_root = ensure_subject_folders(subject_name, user_id)
     idx_path = os.path.join(subject_root, "page_index.json")
-    
+
     if not os.path.isfile(idx_path):
         return []
+
     try:
         with open(idx_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
@@ -121,10 +147,10 @@ def render_pdf_page_image(pdf_path: str, page_num: int):
     """Renders a PDF page to image bytes (path provided must be user-isolated)."""
     if not os.path.exists(pdf_path):
         return None
-        
+
     try:
         doc = fitz.open(pdf_path)
-        page = doc.load_page(page_num - 1) 
+        page = doc.load_page(page_num - 1)
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         img_data = pix.tobytes("png")
         doc.close()
