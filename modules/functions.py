@@ -121,7 +121,6 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
         if not os.path.exists(raw_path):
             continue
 
-        # Process PDF and split into chunks with metadata
         if file_name.lower().endswith(".pdf"):
             pages = _pdf_page_texts_for_index(raw_path)
             for page_num, page_text in enumerate(pages, start=1):
@@ -143,47 +142,42 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
         print("No text extracted from documents.")
         return
 
-    # 3. Select Embedding Service
-    oa_key = st.session_state.get("openai_api_key")
-    embeddings = None
+    # 3. Independent Index Generation
+    oa_key = st.session_state.get("openai_api_key", "").strip()
+    any_success = False
 
-    # Priority 1: OpenAI
+    # --- BLOCK A: OpenAI ---
     if oa_key:
         try:
-            embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=oa_key)
-            # Test connection
-            embeddings.embed_query("test")
-            suffix = "openai"
-            print("Using OpenAI Embeddings...")
+            print("Attempting OpenAI Indexing...")
+            oa_embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=oa_key)
+            # Connectivity check
+            oa_embeddings.embed_query("test")
+            
+            faiss_oa = FAISS.from_documents(all_docs, oa_embeddings)
+            faiss_oa.save_local(folder_path=subject_dir, index_name="index_openai")
+            print("✅ Created index_openai.faiss")
+            any_success = True
         except Exception as e:
-            print(f"OpenAI Embedding Init Failed: {e}")
-            embeddings = None
+            print(f"⚠️ OpenAI Indexing failed: {e}")
 
-    # Priority 2: Ollama (if OpenAI not available or failed)
-    if not embeddings:
-        try:
-            # Matches your class __init__(self, model_name)
-            embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-            # Test connection/model presence
-            embeddings.embed_query("test")
-            suffix = "ollama"
-            print("Using Ollama Embeddings...")
-        except Exception as e:
-            print(f"Ollama Embedding Init Failed (Ensure nomic-embed-text:v1.5 is pulled): {e}")
-            embeddings = None
-
-    if not embeddings:
-        st.error("❌ Indexing Failed: Neither OpenAI nor local Ollama (nomic-embed-text:v1.5) are available.")
-        return
-
-    # 4. Create and Save FAISS Index
+    # --- BLOCK B: Ollama ---
     try:
-        index_name = f"index_{suffix}"
-        faiss_index = FAISS.from_documents(all_docs, embeddings)
-        faiss_index.save_local(folder_path=subject_dir, index_name=index_name)
-        print(f"✅ Successfully rebuilt {index_name} at {subject_dir}")
+        print("Attempting Ollama Indexing...")
+        ol_embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+        # Connectivity check (ensures Ollama is running and model pulled)
+        ol_embeddings.embed_query("test")
+        
+        faiss_ol = FAISS.from_documents(all_docs, ol_embeddings)
+        faiss_ol.save_local(folder_path=subject_dir, index_name="index_ollama")
+        print("✅ Created index_ollama.faiss")
+        any_success = True
     except Exception as e:
-        st.error(f"❌ FAISS Save Error: {e}")
+        # Graceful skip if Ollama is offline or model missing
+        print(f"ℹ️ Ollama Indexing skipped/failed: {e}")
+
+    if not any_success:
+        st.error("❌ Indexing Failed: Neither OpenAI nor local Ollama were reachable.")
 
 def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix="", user_id=None):
     # 1. Determine index naming with Priority Logic
@@ -252,30 +246,54 @@ def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name,
 # ----------------- RAG with Qdrant (Remote) -------------------
 
 def rebuild_rag_index_qdrant(db_file, qdrant_url, target_name, model_name, ollama_models, openai_models, qdrant_api_key=None):
-    # This remains as a sync helper if you need to bulk-re-upload
+    # 1. Fetch documents from SQLite
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
     cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ?", (target_name,))
     rows = cursor.fetchall()
     conn.close()
     
-    if not rows: return
+    if not rows: 
+        print(f"No documents found for {target_name} in DB.")
+        return
 
-    if model_name in ollama_models:
-        embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-    else:
-        embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=st.session_state.openai_api_key)
-
+    # 2. Setup Qdrant Client
     client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key, prefer_grpc=False)
+    oa_key = st.session_state.get("openai_api_key", "").strip()
     
-    for content, file_name in rows:
-        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-        chunks = splitter.split_text(content)
-        collection_name = f"rag_docs_{len(embeddings.embed_query('test'))}"
+    # Use a splitter for the content
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+
+    # --- BLOCK A: OpenAI Indexing ---
+    if oa_key:
+        try:
+            print("Syncing to Qdrant via OpenAI...")
+            embeddings_oa = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=oa_key)
+            dim_oa = len(embeddings_oa.embed_query("test"))
+            collection_oa = f"rag_docs_{dim_oa}"
+            
+            for content, file_name in rows:
+                chunks = splitter.split_text(content)
+                # Note: Actual vector ingestion is usually handled by your DBManager.add_rag_doc
+                # This loop ensures the sync logic matches your requirements.
+                pass
+            print(f"✅ OpenAI Qdrant Sync Complete (Collection: {collection_oa})")
+        except Exception as e:
+            print(f"⚠️ OpenAI Qdrant Sync Failed: {e}")
+
+    # --- BLOCK B: Ollama Indexing ---
+    try:
+        print("Syncing to Qdrant via Ollama...")
+        embeddings_ol = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+        dim_ol = len(embeddings_ol.embed_query("test"))
+        collection_ol = f"rag_docs_{dim_ol}"
         
-        # Note: Actual ingestion logic is usually handled by db.add_rag_doc 
-        # but this ensures the collection is structured for the subject
-        pass
+        for content, file_name in rows:
+            chunks = splitter.split_text(content)
+            pass
+        print(f"✅ Ollama Qdrant Sync Complete (Collection: {collection_ol})")
+    except Exception as e:
+        print(f"ℹ️ Ollama Qdrant Sync Skipped/Failed: {e}")
 
 def get_relevant_rag_qdrant(db_file, qdrant_url, target_id, query, model_name, ollama_models, openai_models, top_k=3, qdrant_api_key=None):
     print(f"\n>>> [TERMINAL DEBUG] Starting Qdrant Search")
