@@ -471,7 +471,7 @@ def main():
 
         if selected_sub != "General":
             # 1. The initial "Delete" button
-            if st.button(f"🗑️ Delete {selected_sub}", type="primary", use_container_width=True):
+            if st.button(f"🗑️ Delete {selected_sub}", type="primary", width='stretch'):
                 st.session_state.confirm_delete = True
 
             # 2. The Confirmation UI
@@ -481,7 +481,7 @@ def main():
                 col_yes, col_no = st.columns(2)
                 
                 with col_yes:
-                    if st.button("✅ Yes, Delete", type="primary", use_container_width=True):
+                    if st.button("✅ Yes, Delete", type="primary", width='stretch'):
                         db.delete_subject(selected_sub, subject_dir=USER_DATA_ROOT)
                         st.session_state.current_subject = "General"
                         st.session_state.current_chat_id = None
@@ -491,7 +491,7 @@ def main():
                         st.rerun()
                 
                 with col_no:
-                    if st.button("❌ Cancel", use_container_width=True):
+                    if st.button("❌ Cancel", width='stretch'):
                         st.session_state.confirm_delete = False
                         st.rerun()
 
@@ -537,14 +537,14 @@ def main():
             except Exception:
                 st.warning("⚠️ Could not load remote chats. Check your Qdrant URL.")
 
-        if st.button("🆕 Start New Chat", disabled=lock_ui, use_container_width=True):
+        if st.button("🆕 Start New Chat", disabled=lock_ui, width='stretch'):
             st.session_state.update({"messages": [], "current_chat_id": None})
             clear_tts(); st.rerun()
 
         for chat_id, model_name, created_at, title in all_chats:
             col1, col2 = st.columns([4, 1])
             with col1:
-                if st.button(f"💬 {title}", key=f"chat_{chat_id}", use_container_width=True):
+                if st.button(f"💬 {title}", key=f"chat_{chat_id}", width='stretch'):
                         msgs, model = db.load_chat(chat_id)
                         st.session_state.update({"messages": msgs, "current_chat_id": chat_id, "selected_model": model})
                         clear_tts(); st.rerun()

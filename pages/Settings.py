@@ -150,7 +150,7 @@ def main():
     with col_v2:
         st.write(" ")
         st.write(" ") 
-        if st.button("▶️ Preview Voice", disabled=not openai_ready, use_container_width=True):
+        if st.button("▶️ Preview Voice", disabled=not openai_ready, width='stretch'):
             preview_text = f"Hello, I am the {st.session_state.tts_voice} voice. How do I sound?"
             try:
                 from modules.functions import speak_text 
@@ -177,9 +177,9 @@ def main():
         
         with cols[i]:
             if is_installed:
-                st.button(f"✅ {display_name}", disabled=True, use_container_width=True)
+                st.button(f"✅ {display_name}", disabled=True, width='stretch')
             else:
-                if st.button(f"📥 Download {display_name}", key=f"dl_{model_name}", disabled=not ollama_online, use_container_width=True):
+                if st.button(f"📥 Download {display_name}", key=f"dl_{model_name}", disabled=not ollama_online, width='stretch'):
                     download_model(model_name)
 
     st.divider()
@@ -192,7 +192,7 @@ def main():
 
         if selected_del != "-- Select a Model --":
             m_to_delete = delete_map[selected_del]
-            if st.button(f"Confirm Deletion of {selected_del}", type="primary", use_container_width=True):
+            if st.button(f"Confirm Deletion of {selected_del}", type="primary", width='stretch'):
                 try:
                     ollama.delete(m_to_delete)
                     st.success(f"Deleted {m_to_delete}")
