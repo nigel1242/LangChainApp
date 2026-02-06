@@ -710,9 +710,10 @@ def main():
                     # --- FINAL FAISS SYNC (only for FAISS) ---
                     if st.session_state.vector_db == "faiss":
                         subject_path = os.path.join(USER_DATA_ROOT, target_sub)
+                        current_model = st.session_state.selected_model
                         if use_ollama:
                             status_text.text("🔄 Rebuilding Ollama FAISS index...")
-                            rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
+                            rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, current_model, 
                                             ollama_models, openai_models, suffix="ollama", user_id=user_id)
                         if use_openai:
                             status_text.text("🔄 Rebuilding OpenAI FAISS index...")

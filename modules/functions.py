@@ -98,32 +98,36 @@ def _pdf_page_texts_for_index(path: str) -> List[str]:
 # ----------------- RAG with FAISS (Local) -------------------
 
 def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollama_models, openai_models, suffix="", user_id=None):
+    # 1. Clear active references to prevent file locking issues
     if target_name in _LOADED_FAISS_INDEXES:
         del _LOADED_FAISS_INDEXES[target_name]
         
+    # 2. Fetch documents from SQLite
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    # Pull text and filename from DB
     cursor.execute("SELECT content, file_name FROM rag_docs WHERE subject_name = ? AND user_id = ?", (target_name, user_id))
     rows = cursor.fetchall()
     conn.close()
     
-    if not rows: return
+    if not rows:
+        print(f"No documents found in DB for subject: {target_name}")
+        return
 
     all_docs = []
     splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
     
     for _, file_name in rows:
         raw_path = os.path.join(subject_dir, "raw", file_name)
-        ext = file_name.lower()
+        if not os.path.exists(raw_path):
+            continue
 
-        splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=50)
-
-        # ---------- PDF ----------
-        if ext.endswith(".pdf"):
+        # Process PDF and split into chunks with metadata
+        if file_name.lower().endswith(".pdf"):
             pages = _pdf_page_texts_for_index(raw_path)
             for page_num, page_text in enumerate(pages, start=1):
-                for chunk_idx, chunk in enumerate(splitter.split_text(page_text), start=1):
+                if not page_text.strip(): continue
+                chunks = splitter.split_text(page_text)
+                for chunk_idx, chunk in enumerate(chunks, start=1):
                     all_docs.append(Document(
                         page_content=chunk,
                         metadata={
@@ -135,44 +139,51 @@ def rebuild_rag_index_faiss(db_file, subject_dir, target_name, model_name, ollam
                         }
                     ))
 
-    # 3. Embeddings & Saving Logic
+    if not all_docs:
+        print("No text extracted from documents.")
+        return
+
+    # 3. Select Embedding Service
     oa_key = st.session_state.get("openai_api_key")
     embeddings = None
 
-    # Priority 1: Use OpenAI if key is present
+    # Priority 1: OpenAI
     if oa_key:
         try:
-            embeddings = OpenAIEmbeddings(
-                model_name="text-embedding-3-small", 
-                api_key=oa_key
-            )
+            embeddings = OpenAIEmbeddings(model_name="text-embedding-3-small", api_key=oa_key)
+            # Test connection
+            embeddings.embed_query("test")
             suffix = "openai"
-            print("Using OpenAI Embeddings for FAISS...")
+            print("Using OpenAI Embeddings...")
         except Exception as e:
             print(f"OpenAI Embedding Init Failed: {e}")
+            embeddings = None
 
-    # Priority 2: Use Ollama if OpenAI failed or key is missing
+    # Priority 2: Ollama (if OpenAI not available or failed)
     if not embeddings:
         try:
-            embeddings = OllamaEmbeddings(model="nomic-embed-text:v1.5")
+            # Matches your class __init__(self, model_name)
+            embeddings = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+            # Test connection/model presence
+            embeddings.embed_query("test")
             suffix = "ollama"
-        except Exception:
+            print("Using Ollama Embeddings...")
+        except Exception as e:
+            print(f"Ollama Embedding Init Failed (Ensure nomic-embed-text:v1.5 is pulled): {e}")
             embeddings = None
 
     if not embeddings:
-        st.error("❌ Indexing Failed: OpenAI key not found and Ollama is not running.")
+        st.error("❌ Indexing Failed: Neither OpenAI nor local Ollama (nomic-embed-text:v1.5) are available.")
         return
 
-    # 4. Perform Indexing and Save
+    # 4. Create and Save FAISS Index
     try:
+        index_name = f"index_{suffix}"
         faiss_index = FAISS.from_documents(all_docs, embeddings)
-        faiss_index.save_local(folder_path=subject_dir, index_name=f"index_{suffix}")
+        faiss_index.save_local(folder_path=subject_dir, index_name=index_name)
+        print(f"✅ Successfully rebuilt {index_name} at {subject_dir}")
     except Exception as e:
-        st.error(f"Error during FAISS save: {e}")
-
-    faiss_index = FAISS.from_documents(all_docs, embeddings)
-    faiss_index.save_local(folder_path=subject_dir, index_name=f"index_{suffix}")
-    print(f"✅ Rebuilt index_{suffix} with page/slide metadata.")
+        st.error(f"❌ FAISS Save Error: {e}")
 
 def get_relevant_rag_faiss(db_file, subject_dir, target_name, query, model_name, ollama_models, openai_models, top_k=3, suffix="", user_id=None):
     # 1. Determine index naming with Priority Logic
