@@ -184,7 +184,6 @@ else:
 
 # ---------- FILE PROCESSING ----------
 with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
-    # 1. Subject Restriction from Chat.py
     if S['selected_subject'] == "General":
         st.info("💡 **Note:** You cannot upload documents to the 'General' subject. Create a new subject in the sidebar first.")
     else:
@@ -198,91 +197,109 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
             target_sub = S["selected_subject"]
             
             if uploaded_files:
-                # 1. Path Construction
-                raw_dir = os.path.join(USER_DATA_ROOT, target_sub, "raw")
-                os.makedirs(raw_dir, exist_ok=True)
-                existing_filenames = os.listdir(raw_dir)
-                
-                # 2. Availability Flags (Strictly using Session State from users.db)
                 oa_key = st.session_state.get("openai_api_key", "").strip()
                 use_openai = bool(oa_key)
-                use_ollama = True # Assuming Ollama is always an option locally
+                use_ollama = True 
 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
                 qdrant_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
 
                 for i, f in enumerate(uploaded_files):
                     percent_val = (i + 1) / len(uploaded_files)
                     progress_bar.progress(percent_val)
                     
-                    if f.name in existing_filenames:
-                        continue
-
                     status_text.text(f"⏳ Processing {i+1}/{len(uploaded_files)}: {f.name}...")
                     
-                    # Save file locally
-                    f.seek(0)
-                    save_uploaded_files(target_sub, [f], user_id=user_id)
-                    original_path = os.path.join(raw_dir, f.name)
-                    
-                    # Convert to PDF if needed
-                    ext = f.name.split('.')[-1].lower()
-                    final_path = original_path
-                    if ext in ["pptx", "docx"]:
-                        pdf_path = convert_to_pdf(original_path)
-                        if pdf_path:
-                            final_path = pdf_path
-                    
-                    # Extract Text
-                    content = extract_text_from_path(final_path)
-                    
-                    # --- CRITICAL SAFETY CHECK: Skip empty extractions to prevent OpenAI crash ---
-                    if not content or not content.strip():
-                        st.warning(f"⚠️ Could not extract text from {f.name}. Skipping...")
-                        continue
-
-                    final_filename = os.path.basename(final_path)
-
-                    # --- PATH A: FAISS (Saves text to SQLite for later indexing) ---
+                    # --- PATH A: FAISS (Permanent Local Storage) ---
                     if st.session_state.vector_db == "faiss":
-                        if use_ollama:
-                            db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
-                                           content=content, metadata={"engine": "ollama"})
-                        if use_openai:
-                            db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
-                                           content=content, metadata={"engine": "openai"})
+                        raw_dir = os.path.join(USER_DATA_ROOT, target_sub, "raw")
+                        os.makedirs(raw_dir, exist_ok=True)
+                        
+                        # Skip if file already exists in this subject's raw folder
+                        if f.name in os.listdir(raw_dir):
+                            continue
 
-                    # --- PATH B: QDRANT (Immediate Vector Ingestion) ---
-                    elif st.session_state.vector_db == "qdrant":
-                        chunks = qdrant_splitter.split_text(content)
-                        for chunk_text in chunks:
-                            if not chunk_text.strip(): continue
-                            
+                        f.seek(0)
+                        save_uploaded_files(target_sub, [f], user_id=user_id)
+                        original_path = os.path.join(raw_dir, f.name)
+                        
+                        ext = f.name.split('.')[-1].lower()
+                        final_path = original_path
+                        
+                        if ext in ["pptx", "docx"]:
+                            pdf_path = convert_to_pdf(original_path)
+                            if pdf_path and pdf_path != original_path:
+                                final_path = pdf_path
+                                # CLEANUP: Remove the original non-PDF file
+                                try: os.remove(original_path)
+                                except: pass
+                        
+                        content = extract_text_from_path(final_path)
+                        final_filename = os.path.basename(final_path)
+
+                        if content and content.strip():
                             if use_ollama:
-                                ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-                                v_ollama = ollama_embedder.embed_query(chunk_text)
-                                db.add_rag_doc(target_id=target_sub, file_name=f.name,
-                                               content=chunk_text, vector_data=v_ollama,
-                                               metadata={"engine": "ollama"})
+                                db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
+                                               content=content, metadata={"engine": "ollama"})
                             if use_openai:
-                                openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
-                                                                   api_key=oa_key)
-                                v_openai = openai_embedder.embed_query(chunk_text)
-                                db.add_rag_doc(target_id=target_sub, file_name=f.name,
-                                               content=chunk_text, vector_data=v_openai,
-                                               metadata={"engine": "openai"})
+                                db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
+                                               content=content, metadata={"engine": "openai"})
+
+                    # --- PATH B: QDRANT (In-Memory Processing & Cleanup) ---
+                    elif st.session_state.vector_db == "qdrant":
+                        import tempfile
+                        f.seek(0)
+                        file_bytes = f.read()
+                        
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{f.name.split('.')[-1]}") as tmp_file:
+                            tmp_file.write(file_bytes)
+                            tmp_path = tmp_file.name
+                        
+                        try:
+                            ext = f.name.split('.')[-1].lower()
+                            final_tmp_path = tmp_path
+                            if ext in ["pptx", "docx"]:
+                                pdf_path = convert_to_pdf(tmp_path)
+                                if pdf_path and pdf_path != tmp_path:
+                                    final_tmp_path = pdf_path
+                                    try: os.remove(tmp_path)
+                                    except: pass
+                            
+                            content = extract_text_from_path(final_tmp_path)
+                            if content and content.strip():
+                                chunks = qdrant_splitter.split_text(content)
+                                for chunk_text in chunks:
+                                    if use_ollama:
+                                        ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
+                                        v_ollama = ollama_embedder.embed_query(chunk_text)
+                                        db.add_rag_doc(target_id=target_sub, file_name=f.name,
+                                                       content=chunk_text, vector_data=v_ollama,
+                                                       metadata={"engine": "ollama"})
+                                    if use_openai:
+                                        openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
+                                                                           api_key=oa_key)
+                                        v_openai = openai_embedder.embed_query(chunk_text)
+                                        db.add_rag_doc(target_id=target_sub, file_name=f.name,
+                                                       content=chunk_text, vector_data=v_openai,
+                                                       metadata={"engine": "openai"})
+                        finally:
+                            # CLEANUP: Remove temp files
+                            try: os.remove(final_tmp_path)
+                            except: pass
 
                 # --- FINAL SYNC ---
                 if st.session_state.vector_db == "faiss":
                     subject_path = os.path.join(USER_DATA_ROOT, target_sub)
+                    # Get selected model from state for the sync
+                    current_model = st.session_state.get("selected_model", "llama3:8b")
+                    
                     if use_ollama:
-                        status_text.text("🔄 Syncing Ollama FAISS index...")
-                        rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "llama3:8b", 
+                        status_text.text("🔄 Rebuilding Ollama FAISS index...")
+                        rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, current_model, 
                                           ollama_models, openai_models, suffix="ollama", user_id=user_id)
                     if use_openai:
-                        status_text.text("🔄 Syncing OpenAI FAISS index...")
+                        status_text.text("🔄 Rebuilding OpenAI FAISS index...")
                         rebuild_rag_index(CHAT_DB_FILE, subject_path, target_sub, "gpt-4o", 
                                           ollama_models, openai_models, suffix="openai", user_id=user_id)
                 
