@@ -52,29 +52,28 @@ os.environ["QDRANT_API_KEY"] = q_key
 openai_functional = bool(oa_key)
 
 # ---------- POST-AUTH INITIALIZATION ----------
+st.session_state.vector_db = "faiss"
+st.session_state.chat_backend = "sqlite"
+
 if "backend_verified" not in st.session_state:
     st.session_state.backend_verified = False
 
-# Initialize DBManager
+# 2. Initialize DBManager (Guaranteed to be sqlite/local)
 db = DBManager(
-    backend=st.session_state.get("chat_backend", "sqlite"),
+    backend="sqlite",
     user_id=user_id,
     db_file=CHAT_DB_FILE,
 )
-    
-v_db_type = st.session_state.get("vector_db", "faiss")
-USER_DATA_ROOT = os.path.join("modules", "subjects", v_db_type, f"user_{user_id}")
+
+# 3. Dynamic Path Logic (Isolated to faiss subdirectory)
+v_db_type = "faiss" 
+USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
 os.makedirs(USER_DATA_ROOT, exist_ok=True)
 
 # --- API KEY RETRIEVAL ---
-oa_key = st.session_state.get("openai_api_key")
-
+oa_key = st.session_state.get("openai_api_key", "").strip()
 st.session_state.openai_api_key = oa_key
 openai_functional = bool(oa_key)
-
-# Set vector_db default if not already set (matching chat.py)
-if "vector_db" not in st.session_state:
-    st.session_state.vector_db = "faiss"
 
 def thread_wrapper(fn, ctx, *args, **kwargs):
     """Injects the Streamlit context into the thread before running the function."""
@@ -174,14 +173,17 @@ if selected_subject != S["selected_subject"]:
     st.rerun()
 
 # Index Path Check
-user_root = os.path.join("modules", "subjects", f"user_{user_id}")
-subject_folder = os.path.join(user_root, S["selected_subject"])
+v_db_type = st.session_state.get("vector_db", "faiss")
+
+# 2. Build the path to the specific subject and index
+subject_folder = os.path.join(USER_DATA_ROOT, S["selected_subject"])
 index_path = os.path.join(subject_folder, f"index_{suffix}.faiss")
 
+# 3. Perform the existence check
 if os.path.exists(index_path):
-    pass
+    st.success(f"✅ Local Index Found: {suffix}")
 else:
-    st.error(f"⚠️ Please upload files and click 'Process RAG' below.")
+    st.error(f"⚠️ Please upload files and click 'Process RAG' below. (Looking in: {index_path})")
 
 # ---------- FILE PROCESSING ----------
 with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
@@ -247,48 +249,6 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
                                 db.add_rag_doc(target_id=target_sub, file_name=final_filename, 
                                                content=content, metadata={"engine": "openai"})
 
-                    # --- PATH B: QDRANT (In-Memory Processing & Cleanup) ---
-                    elif st.session_state.vector_db == "qdrant":
-                        import tempfile
-                        f.seek(0)
-                        file_bytes = f.read()
-                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{f.name.split('.')[-1]}") as tmp_file:
-                            tmp_file.write(file_bytes)
-                            tmp_path = tmp_file.name
-                        
-                        try:
-                            ext = f.name.split('.')[-1].lower()
-                            final_tmp_path = tmp_path
-                            if ext in ["pptx", "docx"]:
-                                pdf_path = convert_to_pdf(tmp_path)
-                                if pdf_path and pdf_path != tmp_path:
-                                    final_tmp_path = pdf_path
-                                    try: os.remove(tmp_path)
-                                    except: pass
-                            
-                            content = extract_text_from_path(final_tmp_path)
-                            if content and content.strip():
-                                chunks = qdrant_splitter.split_text(content)
-                                for chunk_text in chunks:
-                                    if use_ollama:
-                                        ollama_embedder = OllamaEmbeddings(model_name="nomic-embed-text:v1.5")
-                                        v_ollama = ollama_embedder.embed_query(chunk_text)
-                                        db.add_rag_doc(target_id=target_sub, file_name=f.name,
-                                                       content=chunk_text, vector_data=v_ollama,
-                                                       metadata={"engine": "ollama"})
-                                    if use_openai:
-                                        openai_embedder = OpenAIEmbeddings(model_name="text-embedding-3-small", 
-                                                                           api_key=oa_key)
-                                        v_openai = openai_embedder.embed_query(chunk_text)
-                                        db.add_rag_doc(target_id=target_sub, file_name=f.name,
-                                                       content=chunk_text, vector_data=v_openai,
-                                                       metadata={"engine": "openai"})
-                        finally:
-                            # CLEANUP: Remove temp files
-                            try: os.remove(final_tmp_path)
-                            except: pass
-
                 # --- FINAL SYNC ---
                 if st.session_state.vector_db == "faiss":
                     subject_path = os.path.join(USER_DATA_ROOT, target_sub)
@@ -310,13 +270,9 @@ with st.expander(f"📤 Knowledge Base: {S['selected_subject']}"):
             
 # ---------- QUIZ GENERATION ----------
 if st.button("🎲 Generate 10 Questions"):
-    # Updated logic: Check for local file if FAISS, or check connection if Qdrant
     can_generate = True
     if st.session_state.vector_db == "faiss" and not os.path.exists(index_path):
         st.error("Please Process & Sync files first.")
-        can_generate = False
-    elif st.session_state.vector_db == "qdrant" and not st.session_state.get("backend_verified"):
-        st.error("Qdrant is not connected. Check your settings.")
         can_generate = False
 
     if can_generate:
@@ -349,7 +305,7 @@ if st.button("🎲 Generate 10 Questions"):
                 subject=S["selected_subject"],
                 model_name=st.session_state.selected_model,
                 n_questions=10,
-                vector_db=st.session_state.vector_db, # Now dynamic (faiss or qdrant)
+                vector_db=st.session_state.vector_db,
                 user_id=user_id,
                 ollama_models=ollama_models,
                 openai_models=openai_models,
