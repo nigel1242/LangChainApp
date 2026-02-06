@@ -57,12 +57,13 @@ if "backend_verified" not in st.session_state:
 
 # Initialize DBManager
 db = DBManager(
-    backend="sqlite",
+    backend=st.session_state.get("chat_backend", "sqlite"),
     user_id=user_id,
     db_file=CHAT_DB_FILE,
 )
     
-USER_DATA_ROOT = os.path.join("modules", "subjects", f"user_{user_id}")
+v_db_type = st.session_state.get("vector_db", "faiss")
+USER_DATA_ROOT = os.path.join("modules", "subjects", v_db_type, f"user_{user_id}")
 os.makedirs(USER_DATA_ROOT, exist_ok=True)
 
 # --- API KEY RETRIEVAL ---
