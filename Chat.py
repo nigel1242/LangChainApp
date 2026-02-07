@@ -496,20 +496,28 @@ def main():
                         st.rerun()
 
         st.markdown("---")
+
+        qdrant_disabled = not bool(q_url)
         
         backend_choice = st.selectbox(
             "Select Backend",
             ["Local (FAISS)", "Remote (Qdrant)"],
-            index=0 if st.session_state.vector_db == "faiss" else 1
+            index=0 if st.session_state.vector_db == "faiss" else 1,
+            disabled=qdrant_disabled, # Disable if no URL provided
+            help="Add a Qdrant URL in Settings to enable Remote mode." if qdrant_disabled else None
         )
         
-        target_v = "faiss" if backend_choice == "Local (FAISS)" else "qdrant"
-        target_c = "sqlite" if backend_choice == "Local (FAISS)" else "qdrant"
+        if qdrant_disabled:
+            target_v = "faiss"
+            target_c = "sqlite"
+        else:
+            target_v = "faiss" if backend_choice == "Local (FAISS)" else "qdrant"
+            target_c = "sqlite" if backend_choice == "Local (FAISS)" else "qdrant"
 
         if st.session_state.vector_db != target_v:
             st.session_state.vector_db = target_v
             st.session_state.chat_backend = target_c
-            st.session_state.backend_verified = False  # Reset verification flag
+            st.session_state.backend_verified = False  
             new_db = DBManager(
                 backend=target_c, 
                 user_id=user_id, 
