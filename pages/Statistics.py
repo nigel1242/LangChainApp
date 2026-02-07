@@ -254,8 +254,12 @@ if not attempts:
 
 # ------------------ RESET ------------------
 with st.expander("⚠️ Danger Zone"):
+    # Retrieve user_id from session state
+    user_id = st.session_state.get("user_id")
+    
     if st.button(f"🗑️ Reset all statistics for {selected_subject}"):
-        clear_subject_stats(selected_subject)
+        # Pass both the subject and the user_id to the function
+        clear_subject_stats(selected_subject, user_id=user_id)
         st.success(f"Cleared all statistics for {selected_subject}.")
         st.rerun()
 
