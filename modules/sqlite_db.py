@@ -248,3 +248,14 @@ def delete_subject_sqlite(db_file, user_id, subject_name, subject_dir=None):
                 shutil.rmtree(path)
             except Exception as e:
                 print(f"Error deleting folder {path}: {e}")
+
+def update_chat_title_sqlite(db_file: str, chat_id: str, new_title: str, user_id: int):
+    """Updates the title of a specific chat in SQLite."""
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE chats SET title = ? WHERE id = ? AND user_id = ?", 
+        (new_title, chat_id, user_id)
+    )
+    conn.commit()
+    conn.close()

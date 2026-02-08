@@ -19,7 +19,8 @@ from modules.sqlite_db import (
     delete_chat_sqlite,
     delete_subject_sqlite,
     add_rag_doc_sqlite,
-    get_subject_documents_sqlite
+    get_subject_documents_sqlite,
+    update_chat_title_sqlite
 )
 
 # --- Import Qdrant functions ---
@@ -33,7 +34,8 @@ from modules.qdrant_db import (
     add_rag_doc_qdrant,
     load_all_subjects_qdrant,
     create_subject_meta_qdrant,
-    file_exists_qdrant
+    file_exists_qdrant,
+    update_chat_title_qdrant
 )
 
 class DBManager:
@@ -87,22 +89,10 @@ class DBManager:
             return load_all_chats_qdrant(subject_name)
     
     def update_chat_title(self, chat_id, new_title):
+        if self.backend == "sqlite":
+            return update_chat_title_sqlite(self.db_file, chat_id, new_title, self.user_id)
         if self.backend == "qdrant":
-            from modules.qdrant_db import client, CHAT_COLLECTION
-            client.set_payload(
-                collection_name=CHAT_COLLECTION,
-                payload={"title": new_title},
-                points=[chat_id]
-            )
-        else:
-            conn = sqlite3.connect(self.db_file)
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE chats SET title = ? WHERE id = ? AND user_id = ?", 
-                (new_title, chat_id, self.user_id)
-            )
-            conn.commit()
-            conn.close()
+            return update_chat_title_qdrant(chat_id, new_title)
 
     def load_chat(self, chat_id):
         if self.backend == "sqlite":

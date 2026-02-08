@@ -2,7 +2,11 @@ import streamlit as st
 import ollama
 from time import sleep
 import os
-from dotenv import load_dotenv, set_key
+from openai import OpenAI
+from qdrant_client import QdrantClient
+
+# Import the DB update function from your login module
+from modules.login import update_user_credentials
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -11,23 +15,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# --- .ENV MANAGEMENT ---
-ENV_FILE = ".env"
-
-def init_env():
-    """Ensures .env exists and loads the latest values into the environment."""
-    if not os.path.exists(ENV_FILE):
-        with open(ENV_FILE, "w") as f:
-            f.write("OPENAI_API_KEY=\nQDRANT_URL=\nQDRANT_API_KEY=\n")
-    load_dotenv(ENV_FILE, override=True)
-
-def update_env_key(key, value):
-    """Writes the key-value pair to .env and updates the current session."""
-    set_key(ENV_FILE, key, value)
-    os.environ[key] = value
-
-init_env()
 
 # --- MODEL DISPLAY CONFIG ---
 MODEL_DISPLAY_NAMES = {
@@ -43,22 +30,18 @@ def download_model(model_name):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Pull model with streaming enabled
         stream = ollama.pull(model_name, stream=True)
         
         for chunk in stream:
-            # FIX: Check if 'completed' and 'total' are both present AND not None
-            # Some chunks only contain a 'status' string like "pulling manifest"
             completed = chunk.get('completed')
             total = chunk.get('total')
             status = chunk.get('status', 'Processing...')
 
             if completed is not None and total is not None and total > 0:
                 percent = completed / total
-                progress_bar.progress(min(percent, 1.0)) # Ensure it doesn't exceed 100%
+                progress_bar.progress(min(percent, 1.0))
                 status_text.markdown(f"📥 Downloading **{model_name}**: {percent*100:.1f}% complete")
             else:
-                # Display the current status if we don't have numbers yet
                 status_text.markdown(f"🔍 **Status:** {status}")
 
         st.success(f"Downloaded model: {model_name}", icon="🎉")
@@ -67,6 +50,7 @@ def download_model(model_name):
         st.rerun()
     except Exception as e:
         st.error(f"Failed to download model: {model_name}. Error: {str(e)}", icon="😳")
+
 def main():
     st.subheader("⚙️ System Settings", divider="red", anchor=False)
 
@@ -74,9 +58,10 @@ def main():
     st.subheader("🔑 API Configuration", anchor=False)
     
     with st.container(border=True):
-        current_openai = os.getenv("OPENAI_API_KEY", "")
-        current_qdrant_url = os.getenv("QDRANT_URL", "")
-        current_qdrant_key = os.getenv("QDRANT_API_KEY", "")
+        # SOURCE OF TRUTH: Pull from session state (which was loaded from users.db at login)
+        current_openai = st.session_state.get("openai_api_key", "")
+        current_qdrant_url = st.session_state.get("qdrant_url", "")
+        current_qdrant_key = st.session_state.get("qdrant_api_key", "")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -88,18 +73,19 @@ def main():
 
         if st.button("💾 Save API Credentials", type="primary"):
             error_found = False
+            
+            # Validation for Qdrant (only if both fields are provided)
             if new_qdrant_url and new_qdrant_key:
                 try:
-                    from qdrant_client import QdrantClient
                     test_q = QdrantClient(url=new_qdrant_url, api_key=new_qdrant_key, timeout=3)
                     test_q.get_collections()
                 except Exception as e:
                     st.error(f"Qdrant Connection Failed: {e}")
                     error_found = True
 
+            # Validation for OpenAI (only if key is provided)
             if new_openai:
                 try:
-                    from openai import OpenAI
                     test_oa = OpenAI(api_key=new_openai)
                     test_oa.models.list()
                 except Exception as e:
@@ -107,17 +93,38 @@ def main():
                     error_found = True
 
             if not error_found:
-                update_env_key("OPENAI_API_KEY", new_openai)
-                update_env_key("QDRANT_URL", new_qdrant_url)
-                update_env_key("QDRANT_API_KEY", new_qdrant_key)
-                st.success("Credentials validated and saved!")
-                sleep(1)
+                # 1. PERSIST: Save to users.db via the update function
+                update_user_credentials(
+                    user_id=st.session_state.user_id,
+                    openai_key=new_openai,
+                    q_url=new_qdrant_url,
+                    q_key=new_qdrant_key
+                )
+                
+                # 2. MEMORY: Update Session State so other pages see it immediately
+                st.session_state.openai_api_key = new_openai
+                st.session_state.qdrant_url = new_qdrant_url
+                st.session_state.qdrant_api_key = new_qdrant_key
+                
+                # 3. ENVIRONMENT: Update os.environ so existing client calls work
+                os.environ["OPENAI_API_KEY"] = new_openai
+                os.environ["QDRANT_URL"] = new_qdrant_url
+                os.environ["QDRANT_API_KEY"] = new_qdrant_key
+
+                # Reset the verification flag to force Chat.py to re-test the new connection
+                st.session_state.backend_verified = False
+                
+                st.success("✅ Credentials saved to your secure profile!")
+                st.info("💡 Please refresh the Chat page to load updated credentials.")
+                sleep(2)
                 st.rerun()
 
     st.divider()
 
     # --- 2. SERVICE STATUS CHECKS ---
-    openai_ready = bool(os.getenv("OPENAI_API_KEY"))
+    # Check if the keys actually exist in the session now
+    openai_ready = bool(st.session_state.get("openai_api_key"))
+    
     ollama_online = True
     installed_models = []
     try:
@@ -144,12 +151,12 @@ def main():
     with col_v2:
         st.write(" ")
         st.write(" ") 
-        if st.button("▶️ Preview Voice", disabled=not openai_ready, use_container_width=True):
+        if st.button("▶️ Preview Voice", disabled=not openai_ready, width='stretch'):
             preview_text = f"Hello, I am the {st.session_state.tts_voice} voice. How do I sound?"
             try:
-                from Chat import speak_text 
-                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                audio_bytes = speak_text(preview_text, client)
+                from modules.functions import speak_text 
+                client = OpenAI(api_key=st.session_state.openai_api_key)
+                audio_bytes = speak_text(preview_text, client, st.session_state.tts_voice)
                 if audio_bytes:
                     st.audio(audio_bytes, format="audio/mp3")
             except Exception as e:
@@ -171,9 +178,9 @@ def main():
         
         with cols[i]:
             if is_installed:
-                st.button(f"✅ {display_name}", disabled=True, use_container_width=True)
+                st.button(f"✅ {display_name}", disabled=True, width='stretch')
             else:
-                if st.button(f"📥 Download {display_name}", key=f"dl_{model_name}", disabled=not ollama_online, use_container_width=True):
+                if st.button(f"📥 Download {display_name}", key=f"dl_{model_name}", disabled=not ollama_online, width='stretch'):
                     download_model(model_name)
 
     st.divider()
@@ -186,7 +193,7 @@ def main():
 
         if selected_del != "-- Select a Model --":
             m_to_delete = delete_map[selected_del]
-            if st.button(f"Confirm Deletion of {selected_del}", type="primary", use_container_width=True):
+            if st.button(f"Confirm Deletion of {selected_del}", type="primary", width='stretch'):
                 try:
                     ollama.delete(m_to_delete)
                     st.success(f"Deleted {m_to_delete}")
@@ -194,9 +201,8 @@ def main():
                     st.rerun()
                 except Exception as e:
                     st.error(f"Delete failed: {e}")
-
+                    
     st.divider()
-
     # --- 6. SETTINGS VIDEO ---
     st.subheader("🎬 My Learning AI Walkthrough", anchor=False)
     st.video("https://www.youtube.com/watch?v=ssU0zvjxg_4")

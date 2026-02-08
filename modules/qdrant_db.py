@@ -281,3 +281,11 @@ def delete_subject_qdrant(subject_name: str):
             except Exception as e:
                 print(f"[qdrant_db] Could not delete subject points from {col.name}: {e}")
     return True
+def update_chat_title_qdrant(chat_id: str, new_title: str):
+    """Updates the title of a specific chat in Qdrant."""
+    client = get_client()
+    client.set_payload(
+        collection_name=CHAT_COLLECTION,
+        payload={"title": new_title},
+        points=[chat_id]
+    )

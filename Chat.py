@@ -499,27 +499,26 @@ def main():
 
         qdrant_disabled = not bool(q_url)
         
-        backend_choice = st.selectbox(
-            "Select Backend",
-            ["Local (FAISS)", "Remote (Qdrant)"],
-            index=0 if st.session_state.vector_db == "faiss" else 1,
-            disabled=qdrant_disabled, # Disable if no URL provided
-            help="Add a Qdrant URL in Settings to enable Remote mode." if qdrant_disabled else None
-        )
+        # ========== IMPROVED BACKEND SELECTION WITH ERROR PREVENTION ==========
         
-        if qdrant_disabled:
-            target_v = "faiss"
-            target_c = "sqlite"
-        else:
-            target_v = "faiss" if backend_choice == "Local (FAISS)" else "qdrant"
-            target_c = "sqlite" if backend_choice == "Local (FAISS)" else "qdrant"
-
-        if st.session_state.vector_db != target_v:
-            st.session_state.vector_db = target_v
-            st.session_state.chat_backend = target_c
-            st.session_state.backend_verified = False  
+        # Determine available backends based on credentials
+        faiss_available = True  # Always available (local)
+        qdrant_available = bool(q_url and q_key)
+        
+        backend_options = ["Local (FAISS)"]
+        if qdrant_available:
+            backend_options.append("Remote (Qdrant)")
+        
+        current_backend_display = "Local (FAISS)" if st.session_state.vector_db == "faiss" else "Remote (Qdrant)"
+        
+        # SAFETY CHECK: If current backend is Qdrant but credentials are missing, force switch to FAISS
+        if st.session_state.vector_db == "qdrant" and not qdrant_available:
+            st.warning("⚠️ Qdrant credentials missing. Switching to Local (FAISS)...")
+            st.session_state.vector_db = "faiss"
+            st.session_state.chat_backend = "sqlite"
+            st.session_state.backend_verified = False
             new_db = DBManager(
-                backend=target_c, 
+                backend="sqlite", 
                 user_id=user_id, 
                 db_file=CHAT_DB_FILE
             )
@@ -527,7 +526,39 @@ def main():
             ensure_general_exists(new_db, user_id)
             st.session_state.messages = []
             st.session_state.current_chat_id = None
+            time.sleep(1)
             st.rerun()
+        
+        backend_choice = st.selectbox(
+            "Select Backend",
+            backend_options,
+            index=backend_options.index(current_backend_display) if current_backend_display in backend_options else 0,
+            help="⚠️ Qdrant requires API credentials in Settings" if not qdrant_available else None
+        )
+        
+        target_v = "faiss" if backend_choice == "Local (FAISS)" else "qdrant"
+        target_c = "sqlite" if backend_choice == "Local (FAISS)" else "qdrant"
+
+        if st.session_state.vector_db != target_v:
+            # SAFETY CHECK: Don't allow switching to Qdrant without credentials
+            if target_v == "qdrant" and not qdrant_available:
+                st.error("❌ Cannot switch to Qdrant: Missing credentials in Settings")
+                st.info("💡 Please add your Qdrant URL and API Key in the Settings page first.")
+            else:
+                # Safe to switch
+                st.session_state.vector_db = target_v
+                st.session_state.chat_backend = target_c
+                st.session_state.backend_verified = False  # Reset verification flag
+                new_db = DBManager(
+                    backend=target_c, 
+                    user_id=user_id, 
+                    db_file=CHAT_DB_FILE
+                )
+                st.session_state.db = new_db
+                ensure_general_exists(new_db, user_id)
+                st.session_state.messages = []
+                st.session_state.current_chat_id = None
+                st.rerun()
         
         # Show connection status
         if using_qdrant:

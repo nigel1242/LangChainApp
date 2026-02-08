@@ -32,35 +32,31 @@ Watch the walkthrough here (embedded on the Settings page too):
 - **Ollama** (optional, for local models)
   - Download: https://ollama.com/download
 
-## 🛠️ Setup
+## 🛠️ Setup (Ollama)
 If you have a GPU to run ollama models locally, follow the whole flow of this section.  
-Else, skip to "If you don't have a GPU".
 
 1. Install ollama >> https://ollama.com/download/windows
-2. Open terminal in VSCode
-3. Pull ollama models and embedders:
-   ```bash
-   ollama pull nomic-embed-text
-   ollama pull qwen2.5vl
-   ollama pull llama3:8b
-   ```
-   - nomic-embed-text: This is for the ollama embedder.  
-   - qwen2.5vl: This is for multimodal mode, where you can drop images in.  
-   - llama3: This will be the main chat model.
-   ### If you don't have a GPU
-
-If you don't have a GPU, you can only use openAI models.  
-Just enter your API key in the sidebar and select one of the GPT models.
-
-1. Create virtual environment using "py -3.11 -m venv venv".
-2. Run venv using "venv\\scripts\\activate"
-3. Install requirements using "pip install -r requirements.txt"
-4. Create .env file in project folder and copy paste the keys
+2. Ensure ollama is running
+3. Open a new terminal in VSCode and create virtual environment using "py -3.11 -m venv venv".
+4. Run venv using "venv\scripts\activate"
+4. Install requirements using "pip install -r requirements.txt"
 5. Run app using "streamlit run Chat.py"
+6. Open settings, download the embedding model, visual model, and base model.
+7. If you have OpenAI or Qdrant API keys, upload and save them in settings page.
+
+## 🛠️ Setup (OpenAI ONLY)
+
+If you don't have a GPU that can run ollama 7b LLMs, you can only use openAI models.  
+
+1. Open a new terminal in VSCode and create virtual environment using "py -3.11 -m venv venv".
+2. Run venv using "venv\scripts\activate"
+3. Install requirements using "pip install -r requirements.txt"
+4. Run app using "streamlit run Chat.py"
+5. Open settings page, upload and save your OpenAI or Qdrant API keys,
 
 ## ❓Troubleshooting
 
-- If you don’t see models in Settings, ensure Ollama is running.
+- If you don’t see models in Settings, ensure Ollama is running or that you have an OpenAI API key stored.
 - If OpenAI calls fail, verify your API key in the Settings page.
 - If you don’t have API keys, the app can’t access hosted services. Open **Settings** → **API Configuration**, paste your OpenAI key (and Qdrant URL/key if you use it), then click **Save API Credentials**.
 - For GPU-less setups, skip Ollama and use OpenAI models only.
